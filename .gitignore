@@ -1,0 +1,8 @@
+/target/
+.idea/
+.vscode/
+*.class
+*.log
+
+application.properties
+seen_ids.txt
