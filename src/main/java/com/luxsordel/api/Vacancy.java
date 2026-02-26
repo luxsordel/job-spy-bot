@@ -9,6 +9,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 public record Vacancy(String id,
                     String name,
                     @JsonProperty("alternate_url") String alternate_url,
-                    Integer salary,
-                    String employer,
-                    ZonedDateTime published_at) {}
+                    Salary salary,
+                    Employer employer,
+                    @JsonProperty("published_at") ZonedDateTime published_at) {}

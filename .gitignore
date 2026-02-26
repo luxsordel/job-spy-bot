@@ -4,5 +4,7 @@
 *.class
 *.log
 
+target\maven-status\maven-compiler-plugin\compile\default-compile
+
 application.properties
 seen_ids.txt
