@@ -65,7 +65,14 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "check-sources":
         sys.exit(asyncio.run(check_sources(settings, args.query)))
 
-    sys.exit("Команда run появится вместе с Telegram-ботом")
+    from jobspybot.app import run
+
+    try:
+        asyncio.run(run(settings))
+    except ConfigError as exc:
+        sys.exit(f"Ошибка конфигурации: {exc}")
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
