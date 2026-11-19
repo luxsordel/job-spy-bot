@@ -6,6 +6,9 @@
 
 Вход — по `ADMIN_WEB_TOKEN`. Сессия — HttpOnly-кука с HMAC от токена (смена токена
 разлогинивает всех), формы защищены CSRF-полем и `SameSite=Strict`.
+
+`/api/*` — то же для программ (и Claude): заголовок `Authorization: Bearer <токен>`,
+ответы в JSON. Логи, настройки, перезапуск, пользователи и их вакансии — без SSH.
 """
 
 from __future__ import annotations
@@ -14,25 +17,36 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import json
 import logging
+import os
 import time
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from html import escape
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, quote, urlsplit
 
 from jobspybot import __version__
 from jobspybot.billing import PRO, Billing
-from jobspybot.config import Settings
+from jobspybot.config import (
+    EDITABLE_KEYS,
+    SECRET_KEYS,
+    ConfigError,
+    Settings,
+    load_env,
+    parse_dotenv,
+    save_overrides,
+)
 from jobspybot.db import Database, User, utcnow
 from jobspybot.limits import MAX_GRANT_DAYS, parse_int
 from jobspybot.telegram import render as r
 
 if TYPE_CHECKING:
-    from jobspybot.guard import AdminAlerts
+    from jobspybot.guard import AdminAlerts, LogBuffer
     from jobspybot.pipeline import Pipeline
     from jobspybot.telegram.bot import Bot
 
@@ -65,6 +79,14 @@ class Request:
     query: dict[str, str] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
     form: dict[str, str] = field(default_factory=dict)
+    body: bytes = b""
+
+    def json(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.body or b"{}")
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def cookie(self, name: str) -> str:
         for part in self.headers.get("cookie", "").split(";"):
@@ -97,6 +119,58 @@ class Response:
             *(f"{k}: {v}" for k, v in self.headers.items()),
         ]
         return ("\r\n".join(head) + "\r\n\r\n").encode("latin-1") + payload
+
+
+def json_response(data: Any, status: int = 200) -> Response:
+    body = json.dumps(data, ensure_ascii=False, default=str, indent=1)
+    return Response(status, body, content_type="application/json; charset=utf-8")
+
+
+@dataclass
+class Runtime:
+    """Связь админки с процессом: настройки, логи, остановка и перезапуск."""
+
+    env: dict[str, str] = field(default_factory=dict)
+    overrides: Path | None = None
+    logs: LogBuffer | None = None
+    stop: asyncio.Event | None = None
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    restart_requested: bool = False
+
+    def request_restart(self) -> bool:
+        if self.stop is None:
+            return False
+        self.restart_requested = True
+        self.stop.set()
+        return True
+
+
+def effective_values(s: Settings) -> dict[str, str]:
+    """Действующие значения настроек (в том числе значения по умолчанию)."""
+    b, ai, g = s.billing, s.ai, s.guard
+    values: dict[str, object] = {
+        "ACCESS_MODE": b.access_mode,
+        "TRIAL_DAYS": b.trial_days,
+        "PRO_PRICE_STARS": b.pro_price_stars,
+        "SUPPORT_CONTACT": b.support_contact,
+        "POLL_INTERVAL_MIN": s.poll_interval_min,
+        "MAX_VACANCY_AGE_DAYS": s.max_vacancy_age_days,
+        "ENABLED_SOURCES": ",".join(sorted(s.enabled_sources)),
+        "LOG_LEVEL": s.log_level,
+        "SUPERJOB_API_KEY": s.superjob_api_key,
+        "AI_BASE_URL": ai.base_url,
+        "AI_API_KEY": ai.api_key,
+        "AI_MODEL": ai.model,
+        "AI_DAILY_TOKENS_PER_USER": ai.daily_tokens_per_user,
+        "AI_MAX_DESCRIPTION_CHARS": ai.max_description_chars,
+        "AI_MAX_PER_CYCLE": ai.max_per_cycle,
+        "RATE_LIMIT_PER_MIN": g.rate_limit_per_min,
+        "MAX_UPLOADS_PER_DAY": g.max_uploads_per_day,
+        "DELETE_INACTIVE_DAYS": g.inactive_days,
+        "ALERT_COOLDOWN_MIN": g.alert_cooldown_min,
+        "SOURCE_SILENCE_HOURS": g.source_silence_hours,
+    }
+    return {k: str(v) for k, v in values.items()}
 
 
 def redirect(location: str, **headers: str) -> Response:
@@ -179,6 +253,8 @@ NAV = [
     ("/users", "Пользователи"),
     ("/invites", "Приглашения"),
     ("/broadcast", "Рассылка"),
+    ("/logs", "Логи"),
+    ("/settings", "Настройки"),
 ]
 
 
@@ -231,6 +307,18 @@ class Broadcast:
     finished_at: datetime | None = None
 
 
+API_ENDPOINTS = [
+    "GET /api/status",
+    "GET /api/logs?lines=200&level=WARNING&q=текст",
+    "GET /api/config",
+    "POST /api/config {KEY: value}",
+    "POST /api/restart",
+    "POST /api/cycle",
+    "GET /api/users?q=",
+    "GET /api/user?id=ID",
+    "POST /api/user {id, action: grant|allow|deny|ban|unban|pause|unpause|message|delete, ...}",
+]
+
 SEGMENTS = {
     "all": "Все с доступом",
     "free": "Только Free",
@@ -249,7 +337,9 @@ class AdminWeb:
         bot: Bot | None = None,
         pipeline: Pipeline | None = None,
         alerts: AdminAlerts | None = None,
+        runtime: Runtime | None = None,
     ) -> None:
+        self.runtime = runtime or Runtime()
         self.settings = settings
         self.db = db
         self.billing = billing
@@ -317,7 +407,10 @@ class AdminWeb:
             path=url.path or "/",
             query=dict(parse_qsl(url.query)),
             headers=headers,
-            form=dict(parse_qsl(body.decode("utf-8", "replace"))) if body else {},
+            form=dict(parse_qsl(body.decode("utf-8", "replace")))
+            if body and "json" not in headers.get("content-type", "")
+            else {},
+            body=body,
         )
         return await self.handle(request)
 
@@ -328,6 +421,8 @@ class AdminWeb:
             return Response(200, "ok", content_type="text/plain; charset=utf-8")
         if req.path == "/login":
             return self._login(req)
+        if req.path.startswith("/api/"):
+            return await self._api(req)
         if not hmac.compare_digest(req.cookie(COOKIE), self._session):
             return redirect("/login")
         if req.method == "POST" and not hmac.compare_digest(req.form.get("csrf", ""), self._csrf):
@@ -342,6 +437,10 @@ class AdminWeb:
             ("GET", "/broadcast"): self._broadcast_page,
             ("POST", "/broadcast"): self._start_broadcast,
             ("GET", "/logout"): self._logout,
+            ("GET", "/logs"): self._logs_page,
+            ("GET", "/settings"): self._settings_page,
+            ("POST", "/settings"): self._save_settings,
+            ("POST", "/restart"): self._restart,
         }
         handler = routes.get((req.method, req.path))
         if handler is None:
@@ -647,12 +746,45 @@ class AdminWeb:
             "Платежей нет",
         )
         resume_rows = [(escape(x.title), escape(", ".join(x.skills[:10]) or "—")) for x in resumes]
+        status_pill = {
+            "sent": '<span class="pill ok">прислал</span>',
+            "disliked": '<span class="pill">скрыл 👎</span>',
+            "filtered": '<span class="pill">отсеял</span>',
+            "ai_rejected": '<span class="pill warn">ИИ отклонил</span>',
+            "error": '<span class="pill bad">не доставлено</span>',
+        }
+        delivery_rows = [
+            (
+                escape(str(d["at"])[5:16].replace("T", " ")),
+                status_pill.get(str(d["status"]), escape(str(d["status"]))),
+                (
+                    f'<a href="{escape(str(d["url"]))}" rel="noreferrer">'
+                    f"{escape(str(d['title']))}</a>"
+                    if str(d["url"]).startswith(("https://", "http://"))
+                    else escape(str(d["title"]))
+                )
+                + f' <span class="muted">{escape(str(d["company"]))}</span>',
+                "" if d["score"] is None else str(d["score"]),
+                f'<span class="muted">{escape(str(d["reason"])[:90])}</span>',
+            )
+            for d in self.db.recent_deliveries(user.id, 60)
+        ]
+        wanted = sorted(self.pipeline.wanted_roles(user)) if self.pipeline else []
+        deliveries = (
+            f'<p class="muted">Ищет роли: {escape(", ".join(wanted)) or "не определены"}</p>'
+            + table(
+                ["Когда", "Что", "Вакансия", "Балл", "Причина"],
+                delivery_rows,
+                "Вакансий ещё не было",
+            )
+        )
         body = (
             f"{info}<h2>Действия</h2><div>{''.join(actions)}</div>"
             f"<h2>Сообщение</h2>{message_form}"
             f'<div class="cols"><div><h2>Профиль</h2><div class="tg">{profile}</div></div>'
             f'<div><h2>Поиск</h2><div class="tg">{summary}</div></div></div>'
             f"<h2>Резюме</h2>{table(['Название', 'Навыки'], resume_rows, 'Резюме нет')}"
+            f"<h2>Последние вакансии</h2>{deliveries}"
             f"<h2>Платежи</h2>{payments}"
             f"<h2>Удаление данных</h2>{delete_form}"
         )
@@ -725,6 +857,300 @@ class AdminWeb:
         except Exception as exc:
             log.info("admin web: message to %s failed: %r", chat_id, exc)
             return False
+
+    # --- логи, настройки, перезапуск ---------------------------------------------
+
+    def _log_lines(self, limit: int, level: str, query: str) -> list[dict[str, str]]:
+        if self.runtime.logs is None:
+            return []
+        return [
+            {
+                "at": ln.at.isoformat(timespec="seconds"),
+                "level": ln.level,
+                "name": ln.name,
+                "text": ln.text,
+            }
+            for ln in self.runtime.logs.tail(limit, level=level, query=query)
+        ]
+
+    async def _logs_page(self, req: Request) -> Response:
+        level = req.query.get("level", "")
+        query = req.query.get("q", "")[:100]
+        limit = min(2000, max(1, parse_int(req.query.get("lines", "300")) or 300))
+        options = "".join(
+            f'<option value="{v}"{" selected" if v == level else ""}>{label}</option>'
+            for v, label in (
+                ("", "все"),
+                ("WARNING", "предупреждения и ошибки"),
+                ("ERROR", "ошибки"),
+            )
+        )
+        form = (
+            '<form method="get" action="/logs" class="inline">'
+            f'<select name="level">{options}</select>'
+            f'<input name="q" value="{escape(query)}" placeholder="поиск">'
+            f'<input name="lines" type="number" value="{limit}" min="1" max="2000" '
+            'style="width:90px">'
+            '<button class="ghost">Показать</button></form>'
+        )
+        if self.runtime.logs is None:
+            return Response(
+                200, page("Логи", '<p class="muted">Логи не подключены</p>', active="/logs")
+            )
+        lines = self._log_lines(limit, level, query)
+        css = {"ERROR": "bad", "CRITICAL": "bad", "WARNING": "warn"}
+        text = "\n".join(
+            f'<span class="muted">{escape(x["at"][5:16].replace("T", " "))}</span> '
+            f'<span class="pill {css.get(x["level"], "")}">{escape(x["level"])}</span> '
+            f'<span class="muted">{escape(x["name"])}</span> {escape(x["text"])}'
+            for x in reversed(lines)
+        )
+        body = (
+            f'{form}<p class="muted">Свежие сверху, время UTC. Хранятся последние строки с момента '
+            f"запуска ({fmt_dt(self.runtime.started_at)}).</p>"
+            f'<div class="tg" style="font:12px/1.5 ui-monospace,Consolas,monospace">'
+            f"{text or 'Пусто'}</div>"
+        )
+        return Response(200, page("Логи", body, active="/logs"))
+
+    def _config(self) -> list[dict[str, Any]]:
+        """Текущие настройки: действующие сейчас и сохранённые в админке (до перезапуска)."""
+        saved: dict[str, str] = {}
+        path = self.runtime.overrides
+        if path and path.is_file():
+            saved = parse_dotenv(path.read_text(encoding="utf-8"))
+        effective = effective_values(self.settings)
+        out = []
+        for key in EDITABLE_KEYS:
+            active = self.runtime.env.get(key) or effective.get(key, "")
+            pending = saved.get(key)
+            if key in os.environ:
+                source = "окружение"
+            elif pending is not None:
+                source = "админка"
+            elif key in self.runtime.env:
+                source = ".env"
+            else:
+                source = "по умолчанию"
+            secret = key in SECRET_KEYS
+            out.append(
+                {
+                    "key": key,
+                    "value": ("задан" if active else "") if secret else active,
+                    "saved": (("задан" if pending else "") if secret else pending)
+                    if pending is not None
+                    else None,
+                    "source": source,
+                    "secret": secret,
+                    "locked": key in os.environ,
+                }
+            )
+        return out
+
+    def _apply_config(self, changes: dict[str, str]) -> tuple[bool, str]:
+        if self.runtime.overrides is None:
+            return False, "Файл настроек не подключён (бот запущен без админки?)"
+        clean = {str(k): str(v) for k, v in changes.items() if k in EDITABLE_KEYS}
+        if not clean:
+            return False, "Нечего сохранять"
+        try:
+            # проверяем, что с новыми значениями бот вообще запустится
+            merged = load_env(None, self.runtime.overrides)
+            merged = {**self.runtime.env, **merged, **clean}
+            Settings.from_env({k: v for k, v in merged.items() if v != ""})
+            save_overrides(self.runtime.overrides, clean)
+        except ConfigError as exc:
+            return False, f"Не сохранено: {exc}"
+        names = ", ".join(sorted(clean))
+        log.warning("admin web: settings changed: %s", names)
+        return True, f"Сохранено: {names}. Применится после перезапуска."
+
+    async def _settings_page(self, req: Request) -> Response:
+        rows = []
+        for c in self._config():
+            if c["locked"]:
+                field_html = '<span class="muted">задано переменной окружения</span>'
+            else:
+                kind = "password" if c["secret"] else "text"
+                hint = "оставьте пустым, чтобы не менять" if c["secret"] else ""
+                value = (
+                    ""
+                    if c["secret"]
+                    else escape(c["saved"] if c["saved"] is not None else c["value"])
+                )
+                field_html = (
+                    f'<input type="{kind}" name="{c["key"]}" value="{value}" '
+                    f'placeholder="{hint}" style="width:100%" autocomplete="off">'
+                )
+            pending = (
+                ' <span class="pill warn">ждёт перезапуска</span>'
+                if c["saved"] is not None and c["saved"] != c["value"] and not c["secret"]
+                else ""
+            )
+            rows.append(
+                f'<tr><td><code>{c["key"]}</code><div class="muted" style="font-size:12px">'
+                f"{escape(c['source'])}{pending}</div></td>"
+                f'<td style="white-space:normal;min-width:220px">{field_html}</td></tr>'
+            )
+        form = self._form(
+            "/settings",
+            '<div class="scroll"><table><tr><th>Параметр</th><th>Значение</th></tr>'
+            + "".join(rows)
+            + "</table></div>",
+            "<p><button>Сохранить</button></p>",
+            cls="",
+        )
+        restart = self._form("/restart", "", '<button class="danger">Перезапустить бота</button>')
+        body = (
+            '<p class="muted">Токены Telegram и админки, адрес, порт, база и список админов '
+            "меняются только в .env — ошибка в них отрежет доступ. Остальное сохраняется "
+            "здесь и применяется после перезапуска.</p>"
+            f'{form}<h2>Перезапуск</h2><p class="muted">Бот работает с '
+            f"{fmt_dt(self.runtime.started_at)} UTC. Перезапуск занимает несколько секунд.</p>"
+            f"{restart}"
+        )
+        flash = req.query.get("msg", "")[:300]
+        return Response(
+            200,
+            page(
+                "Настройки", body, active="/settings", flash=flash, bad=req.query.get("bad") == "1"
+            ),
+        )
+
+    async def _save_settings(self, req: Request) -> Response:
+        changes = {
+            k: v
+            for k, v in req.form.items()
+            if k in EDITABLE_KEYS and not (k in SECRET_KEYS and not v.strip())
+        }
+        current = {c["key"]: c for c in self._config()}
+        # неизменённые поля не трогаем — чтобы «по умолчанию» не превращалось в правку
+        changes = {
+            k: v
+            for k, v in changes.items()
+            if k in SECRET_KEYS
+            or v.strip()
+            != (current[k]["saved"] if current[k]["saved"] is not None else current[k]["value"])
+        }
+        if not changes:
+            return redirect("/settings?msg=" + quote("Ничего не изменилось"))
+        ok, text = self._apply_config(changes)
+        return redirect(f"/settings?msg={quote(text)}{'' if ok else '&bad=1'}")
+
+    async def _restart(self, req: Request) -> Response:
+        if not self.runtime.request_restart():
+            return redirect("/settings?bad=1&msg=" + quote("Перезапуск недоступен"))
+        log.warning("admin web: restart requested")
+        return Response(
+            200,
+            page(
+                "Перезапуск",
+                '<p>Бот перезапускается. <a href="/">Обновите страницу</a> через 10–20 секунд.</p>',
+                active="/settings",
+            ),
+        )
+
+    # --- API ------------------------------------------------------------------
+
+    async def _api(self, req: Request) -> Response:
+        auth = req.headers.get("authorization", "")
+        token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
+        if not token or not hmac.compare_digest(
+            token.encode(), self.settings.admin_web.token.encode()
+        ):
+            return json_response({"error": "unauthorized"}, 401)
+        path = req.path.removeprefix("/api").rstrip("/") or "/"
+        try:
+            return await self._api_route(req, path)
+        except Exception as exc:
+            log.exception("admin api %s failed", path)
+            return json_response({"error": repr(exc)}, 500)
+
+    async def _api_route(self, req: Request, path: str) -> Response:
+        m = req.method
+        if (m, path) == ("GET", "/status"):
+            return json_response(self._status())
+        if (m, path) == ("GET", "/logs"):
+            limit = min(3000, max(1, parse_int(req.query.get("lines", "200")) or 200))
+            return json_response(
+                self._log_lines(limit, req.query.get("level", ""), req.query.get("q", ""))
+            )
+        if (m, path) == ("GET", "/config"):
+            return json_response(self._config())
+        if (m, path) == ("POST", "/config"):
+            ok, text = self._apply_config({str(k): str(v) for k, v in req.json().items()})
+            return json_response({"ok": ok, "message": text}, 200 if ok else 400)
+        if (m, path) == ("POST", "/restart"):
+            ok = self.runtime.request_restart()
+            log.warning("admin api: restart requested")
+            return json_response({"ok": ok}, 200 if ok else 409)
+        if (m, path) == ("POST", "/cycle"):
+            if self.pipeline is None:
+                return json_response({"error": "pipeline not attached"}, 409)
+            stats = await self.pipeline.run_cycle()
+            return json_response({"ok": True, "stats": stats.__dict__})
+        if (m, path) == ("GET", "/users"):
+            users = self.db.search_users(req.query.get("q", "")[:64], limit=200)
+            return json_response([self._user_json(u) for u in users])
+        if path == "/user":
+            data = req.json() if m == "POST" else {}
+            uid = parse_int(str(data.get("id") or req.query.get("id", "")))
+            user = self.db.get_user(uid) if uid is not None else None
+            if user is None:
+                return json_response({"error": "user not found"}, 404)
+            if m == "POST":
+                form = {k: str(v) for k, v in data.items()}
+                ok, text = await self._apply(user, form.get("action", ""), form)
+                return json_response({"ok": ok, "message": text}, 200 if ok else 400)
+            return json_response(self._user_json(user, full=True))
+        return json_response({"error": "not found", "endpoints": API_ENDPOINTS}, 404)
+
+    def _status(self) -> dict[str, Any]:
+        pipe = self.pipeline
+        return {
+            "version": __version__,
+            "started_at": self.runtime.started_at,
+            "stats": self.db.business_stats(),
+            "funnel": self.db.funnel(),
+            "ai_tokens_today": self.db.tokens_since(utcnow().date().isoformat()),
+            "last_cycle_at": pipe.last_cycle_at if pipe else None,
+            "last_cycle": pipe.last_cycle.__dict__ if pipe and pipe.last_cycle else None,
+            "sources": {n: st.__dict__ for n, st in pipe.status.items()} if pipe else {},
+            "alerts": [
+                {"at": a.at, "count": a.count, "text": a.text}
+                for a in (self.alerts.recent if self.alerts else [])
+            ],
+        }
+
+    def _user_json(self, u: User, *, full: bool = False) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "id": u.id,
+            "username": u.username,
+            "plan": self.billing.plan(u).name,
+            "plan_until": u.plan_until,
+            "allowed": u.allowed,
+            "banned": u.banned,
+            "paused": u.paused,
+            "onboarded": u.onboarded,
+            "last_seen": u.last_seen,
+            "queries": u.filters.queries,
+        }
+        if full:
+            profile = self.db.get_profile(u.id)
+            data |= {
+                "filters": json.loads(u.filters.to_json()),
+                "profile": json.loads(profile.to_json()),
+                "resumes": [
+                    {"id": x.id, "title": x.title, "skills": x.skills, "chars": len(x.text)}
+                    for x in self.db.get_resumes(u.id)
+                ],
+                "wanted_roles": sorted(self.pipeline.wanted_roles(u)) if self.pipeline else None,
+                "ai_tokens_today": self.db.tokens_today(u.id),
+                "ai_token_limit": self.billing.ai_token_limit(u),
+                "stats_7d": self.db.stats(u.id),
+                "deliveries": self.db.recent_deliveries(u.id, 100),
+            }
+        return data
 
     # --- приглашения ----------------------------------------------------------
 

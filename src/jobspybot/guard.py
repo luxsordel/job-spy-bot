@@ -137,3 +137,49 @@ class AdminAlerts(logging.Handler):
                 await notify(getter.result())
             except Exception as exc:  # без log.error — иначе сами себе пришлём алерт
                 log.warning("admin alert failed: %r", exc)
+
+
+@dataclass(slots=True)
+class LogLine:
+    at: datetime
+    level: str
+    name: str
+    text: str
+
+
+class LogBuffer(logging.Handler):
+    """Последние строки лога в памяти — чтобы читать их из веб-админки и API без SSH."""
+
+    def __init__(self, keep: int = 3000, level: int = logging.INFO) -> None:
+        super().__init__(level=level)
+        self.lines: deque[LogLine] = deque(maxlen=keep)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            text = record.getMessage()
+            if record.exc_info and record.exc_info[1] is not None:
+                text += "\n" + logging.Formatter().formatException(record.exc_info)
+            self.lines.append(
+                LogLine(
+                    datetime.fromtimestamp(record.created, UTC),
+                    record.levelname,
+                    record.name,
+                    text[:4000],
+                )
+            )
+        except Exception:
+            self.handleError(record)
+
+    def tail(self, limit: int = 200, *, level: str = "", query: str = "") -> list[LogLine]:
+        """Последние `limit` строк не ниже `level`, содержащие `query`."""
+        min_level = logging.getLevelName(level.upper()) if level else 0
+        if not isinstance(min_level, int):
+            min_level = 0
+        q = query.lower()
+        found = [
+            line
+            for line in self.lines
+            if logging.getLevelName(line.level) >= min_level
+            and (not q or q in line.text.lower() or q in line.name.lower())
+        ]
+        return found[-limit:]

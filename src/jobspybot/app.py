@@ -10,7 +10,7 @@ from html import escape
 from typing import Any
 
 from jobspybot import __version__
-from jobspybot.admin_web import AdminWeb
+from jobspybot.admin_web import AdminWeb, Runtime
 from jobspybot.ai.client import LLMClient
 from jobspybot.ai.service import AIService
 from jobspybot.billing import Billing
@@ -91,7 +91,9 @@ async def maintenance(bot: Bot, stop: asyncio.Event, every: float = 6 * 3600) ->
             await asyncio.wait_for(stop.wait(), timeout=every)
 
 
-async def run(settings: Settings) -> None:
+async def run(settings: Settings, runtime: Runtime | None = None) -> bool:
+    """Работает до остановки. True — просили перезапуск (из веб-админки или API)."""
+    runtime = runtime or Runtime()
     if not settings.telegram_token:
         raise ConfigError("не задан TELEGRAM_BOT_TOKEN")
     if not settings.admin_ids:
@@ -134,7 +136,7 @@ async def run(settings: Settings) -> None:
     else:
         log.info("AI disabled: set AI_BASE_URL, AI_API_KEY and AI_MODEL to enable")
 
-    stop = asyncio.Event()
+    stop = runtime.stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):  # Windows
@@ -151,7 +153,9 @@ async def run(settings: Settings) -> None:
             asyncio.create_task(maintenance(bot, stop), name="maintenance"),
         ]
         if settings.admin_web.enabled:
-            web = AdminWeb(settings, db, billing, bot=bot, pipeline=pipeline, alerts=alerts)
+            web = AdminWeb(
+                settings, db, billing, bot=bot, pipeline=pipeline, alerts=alerts, runtime=runtime
+            )
             tasks.append(asyncio.create_task(web.serve(stop), name="admin-web"))
         await bot.notify_admins(f"🔄 Бот запущен (v{__version__})")
         await stop.wait()
@@ -165,4 +169,5 @@ async def run(settings: Settings) -> None:
         await api.aclose()
         await http.aclose()
         db.close()
-        log.info("stopped")
+        log.info("restarting" if runtime.restart_requested else "stopped")
+    return runtime.restart_requested

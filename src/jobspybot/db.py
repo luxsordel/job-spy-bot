@@ -662,6 +662,31 @@ class Database:
             )
         )
 
+    def recent_deliveries(self, user_id: int, limit: int = 50) -> list[dict[str, object]]:
+        """Что бот делал с вакансиями человека: прислал, отсеял (почему), ИИ отклонил."""
+        rows = self.conn.execute(
+            "SELECT d.status, d.reason, d.score, d.created_at, v.data FROM deliveries d"
+            " LEFT JOIN vacancies v ON v.uid = d.vacancy_uid WHERE d.user_id = ?"
+            " ORDER BY d.created_at DESC LIMIT ?",
+            (user_id, limit),
+        )
+        out = []
+        for r in rows:
+            data = json.loads(r["data"]) if r["data"] else {}
+            out.append(
+                {
+                    "status": r["status"],
+                    "reason": r["reason"],
+                    "score": r["score"],
+                    "at": r["created_at"],
+                    "title": data.get("title", ""),
+                    "company": data.get("company", ""),
+                    "source": data.get("source", ""),
+                    "url": data.get("url", ""),
+                }
+            )
+        return out
+
     def payments_of(self, user_id: int) -> list[sqlite3.Row]:
         return list(
             self.conn.execute(
