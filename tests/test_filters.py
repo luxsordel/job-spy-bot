@@ -95,3 +95,26 @@ def test_filters_json_roundtrip_ignores_unknown_keys():
     f = UserFilters(queries=["python"], levels=["junior"], min_salary_usd=800)
     assert UserFilters.from_json(f.to_json()) == f
     assert UserFilters.from_json('{"queries": ["x"], "obsolete": 1}').queries == ["x"]
+
+
+def test_format_filter():
+    f = UserFilters(formats=["hybrid"])
+    assert check(vac(work_formats=("hybrid", "remote")), f, now=NOW) is None
+    assert "формат" in check(vac(work_formats=("office",)), f, now=NOW)
+    assert check(vac(), f, now=NOW) is None  # формат неизвестен — пропускаем
+    f.strict_format = True
+    assert "не указан" in check(vac(), f, now=NOW)
+    # «удалёнка» без явного формата (Habr, praca.by) — тоже формат
+    assert "формат" in check(vac(remote=True), UserFilters(formats=["office"]), now=NOW)
+
+
+def test_home_city_filter():
+    f = UserFilters(only_home_city=True, home_city="Минск", home_country="BY")
+    assert check(vac(location="Минск", country="BY"), f, now=NOW) is None
+    assert check(vac(location="Minsk"), f, now=NOW) is None
+    assert "Минск" in check(vac(location="Гомель", country="BY"), f, now=NOW)
+    # удалёнка и другие страны (релокация) не режутся
+    assert check(vac(location="Гомель", country="BY", work_formats=("remote",)), f, now=NOW) is None
+    assert check(vac(location="Warszawa", country="PL"), f, now=NOW) is None
+    # адрес тоже считается
+    assert check(vac(location="", address="г. Минск, ул. Притыцкого"), f, now=NOW) is None

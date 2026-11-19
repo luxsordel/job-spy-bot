@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 def wire_ai(bot: Bot, ai: AIService) -> None:
     """Подключает ИИ к боту: профиль из резюме и кнопка «Отклик» под вакансиями."""
     bot.on_resume = ai.build_profile
+    bot.on_profile_edit = ai.parse_profile_edit
     ai.token_limit = bot.billing.ai_token_limit
 
     async def on_apply(user: User, cb: dict[str, Any], value: str) -> None:

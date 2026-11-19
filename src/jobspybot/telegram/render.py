@@ -8,6 +8,7 @@ from html import escape
 from jobspybot.billing import FREE, PRO, Plan
 from jobspybot.filters import COUNTRIES, LEVEL_TITLES, UserFilters
 from jobspybot.models import Level, Vacancy
+from jobspybot.profile import RELOCATION_COUNTRIES, WORK_FORMATS, UserProfile
 from jobspybot.sources import REGISTRY
 
 BRAND = "Job Spy"
@@ -20,7 +21,8 @@ BTN_FILTERS = "⚙️ Фильтры"
 BTN_PLAN = "💎 Подписка"
 BTN_STATS = "📊 Статистика"
 BTN_HELP = "❓ Помощь"
-MENU_ROWS = [[BTN_SEARCH, BTN_RESUMES], [BTN_FILTERS, BTN_PLAN], [BTN_STATS, BTN_HELP]]
+BTN_PROFILE = "👤 Профиль"
+MENU_ROWS = [[BTN_SEARCH, BTN_PROFILE], [BTN_RESUMES, BTN_FILTERS], [BTN_PLAN, BTN_HELP]]
 
 # --- готовые направления для быстрого выбора ---------------------------------
 
@@ -52,6 +54,9 @@ LEVEL_BUTTONS = {
 }
 
 
+FORMAT_BADGES = {"remote": "🏠 удалённо", "hybrid": "🔀 гибрид", "office": "🏢 офис"}
+
+
 def vacancy_card(v: Vacancy, extra: str = "") -> str:
     lines = [f'<b><a href="{escape(v.url, quote=True)}">{escape(v.title)}</a></b>']
     where = " · ".join(
@@ -60,7 +65,8 @@ def vacancy_card(v: Vacancy, extra: str = "") -> str:
             [
                 f"🏢 {escape(v.company)}" if v.company else "",
                 f"📍 {escape(v.location)}" if v.location else "",
-                "🏠 удалённо" if v.remote else "",
+                *[FORMAT_BADGES[f] for f in v.work_formats if f in FORMAT_BADGES],
+                "🏠 удалённо" if v.remote and not v.work_formats else "",
             ],
         )
     )
@@ -77,6 +83,8 @@ def vacancy_card(v: Vacancy, extra: str = "") -> str:
     )
     if meta:
         lines.append(meta)
+    if v.address:
+        lines.append(f"🗺 {escape(v.address)}")
     source = REGISTRY[v.source].title if v.source in REGISTRY else v.source
     date = v.published_at.strftime("%d.%m") if v.published_at else ""
     lines.append(f"🔎 {escape(source)}{' · ' + date if date else ''}")
@@ -164,6 +172,75 @@ def search_summary(
     )
 
 
+def _years(value: float) -> str:
+    n = int(value) if float(value).is_integer() else value
+    if isinstance(n, float):
+        return f"{n} года"
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} год"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} года"
+    return f"{n} лет"
+
+
+def profile_card(p: UserProfile, queries: list[str], *, title: str = "👤 Профиль") -> str:
+    unknown = "<i>не указано</i>"
+    head = " · ".join(escape(x) for x in (p.name, p.headline) if x)
+    level = LEVEL_BUTTONS.get(p.level, "") if p.level else ""
+    exp = f"опыт {_years(p.experience_years)}" if p.experience_years else ""
+    level_line = " · ".join(x for x in (level, exp) if x) or unknown
+    place = ", ".join(x for x in (p.city, p.country) if x)
+    formats = ", ".join(WORK_FORMATS[f] for f in p.work_formats if f in WORK_FORMATS)
+    if p.relocation is True:
+        where = ", ".join(RELOCATION_COUNTRIES.get(c, c) for c in p.relocation_countries)
+        reloc = "да" + (f" — {where}" if where else "")
+    elif p.relocation is False:
+        reloc = "нет"
+    else:
+        reloc = unknown
+    if p.salary_usd is None:
+        salary = unknown
+    elif p.salary_usd == 0:
+        salary = "не важно"
+    else:
+        salary = f"от {p.salary_usd}$ в месяц"
+    lines = [f"<b>{title}</b>"]
+    if head:
+        lines.append(head)
+    lines += [
+        "",
+        f"🎓 Уровень: {level_line}",
+        f"🧩 Навыки: {_list(p.skills[:15], unknown)}",
+        f"🗣 Языки: {_list(p.languages, unknown)}",
+        f"📍 Живу: {escape(place) if place else unknown} · гражданство {escape(p.citizenship)}",
+        f"🏢 Формат: {escape(formats) if formats else unknown}"
+        + (f" · только г. {escape(p.city)}" if p.only_home_city and p.city else ""),
+        f"✈️ Релокация: {reloc}",
+        f"💰 Ожидания: {salary}",
+        f"🔍 Ищу: {_list(queries or p.directions, unknown)}",
+    ]
+    if p.wishes:
+        lines.append(f"📝 Пожелания: {escape(p.wishes)}")
+    return "\n".join(lines)
+
+
+QUESTION_TEXTS = {
+    "directions": ("Что ищем?", "Выберите направления или нажмите «✍️ Свой вариант»."),
+    "level": ("Какой у вас уровень?", "Покажу вакансии этого уровня и на ступень ниже."),
+    "work_formats": ("Какой формат работы подходит?", "Можно несколько."),
+    "relocation": ("Готовы к релокации?", "Если да — подскажу вакансии с переездом."),
+    "relocation_countries": ("Куда готовы переехать?", "Можно несколько."),
+    "salary": ("Сколько хотите получать?", "В $ в месяц «на руки». Ниже — не покажу."),
+}
+
+
+def question(key: str, step: int | None = None, total: int | None = None) -> str:
+    title, hint = QUESTION_TEXTS[key]
+    if step and total:
+        return onboarding_step(step, total, title, hint)
+    return f"<b>{title}</b>\n{hint}"
+
+
 # совместимость со старой командой /settings
 def settings_text(
     f: UserFilters, available_sources: list[str], *, paused: bool, resumes: int
@@ -227,14 +304,15 @@ HELP = f"""<b>{BRAND}</b> — ваш помощник в поиске работ
 4. Присылаю только то, где есть шанс. Кнопка <b>📄 Отклик</b> — лучшее резюме и письмо.
 
 <b>Меню</b>
-{BTN_SEARCH} — что и где ищем
+{BTN_SEARCH} — что и где ищем, статистика
+{BTN_PROFILE} — ваш профиль: заполняется из резюме, правится кнопками
 {BTN_RESUMES} — загрузить PDF, список резюме
 {BTN_FILTERS} — направления, уровень, страны, зарплата…
 {BTN_PLAN} — тарифы и оплата
-{BTN_STATS} — что нашлось за неделю
 
 <b>Подсказки</b>
-• Резюме — просто пришлите PDF в чат. Можно несколько под разные роли.
+• Резюме — просто пришлите PDF в чат: я сам заполню профиль и настрою поиск.
+  Можно несколько резюме под разные роли.
 • 👎 под вакансией — скрыть её.
 • Свои направления: <code>/query python developer; тестировщик</code>
 • Стоп-слова: <code>/exclude senior, 1с</code>"""

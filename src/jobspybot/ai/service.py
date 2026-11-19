@@ -37,33 +37,49 @@ log = logging.getLogger(__name__)
 #: сколько резюме максимум отправлять в модель для одной вакансии
 MAX_RESUMES_PER_EVAL = 3
 
-PROFILE_SYSTEM = """Сожми резюме в профиль кандидата для автоматического подбора вакансий.
-Ответь только JSON:
+PROFILE_SYSTEM = """Разбери резюме для автоматического подбора вакансий.
+Ответь только JSON; чего нет в резюме — null или пустое значение, ничего не выдумывай:
 {"summary": "до 300 символов: роль, опыт в годах, главное", \
+"name": "имя кандидата", \
+"headline": "роль одной строкой, напр. Junior Python backend-разработчик", \
 "level": "intern|junior|middle|senior|lead", \
+"experience_years": число лет практического опыта, \
 "skills": ["до 20 технологий/навыков в нижнем регистре"], \
 "languages": ["язык и уровень"], \
-"wants": "до 150 символов: что ищет — формат, страна, зарплата; пусто, если не указано"}"""
+"city": "город проживания", "country": "страна проживания, ISO-код из 2 букв", \
+"citizenship": "гражданство, ISO-код из 2 букв, если указано", \
+"work_formats": ["remote|hybrid|office — только если в резюме указано"], \
+"relocation": true/false/null, "relocation_countries": ["ISO-коды"], \
+"salary_usd": ожидания в $ в месяц числом или null, \
+"directions": ["2–4 поисковых запроса для сайтов вакансий, напр. python developer"], \
+"wants": "до 150 символов: что ищет; пусто, если не указано"}"""
 
 EVAL_SYSTEM = """Ты оцениваешь, насколько вакансия подходит кандидату. У кандидата одно или \
 несколько резюме: выбери то, с которым больше всего шансов получить оффер, и оцени по нему.
-Кандидат — гражданин Беларуси: если вакансия для него недоступна или рискованна (нужно \
-гражданство/разрешение на работу без визовой поддержки, только резиденты страны, ограничения \
-для граждан РБ), отметь это.
+Учитывай гражданство и обстоятельства кандидата (строка «Кандидат»): если вакансия для него \
+недоступна или рискованна (нужно гражданство/разрешение на работу без визовой поддержки, только \
+резиденты страны, ограничения по гражданству, не тот формат работы), отметь это в "by".
 Ответь только JSON:
 {"best": номер резюме, "score": 0-100, "by": "ok|risk|no", "verdict": "до 90 символов", \
 "pros": ["до 2 пунктов по 50 символов"], "cons": ["до 2 пунктов по 50 символов"], \
 "by_note": "до 70 символов или пусто"}
 Пиши коротко, без повторов.
-
-Резюме кандидата:
 """
+
+PROFILE_EDIT_SYSTEM = """Пользователь бота поиска работы пишет, что хочет изменить в поиске.
+Верни только JSON с полями, которые нужно изменить (остальные не включай):
+{"work_formats": ["remote|hybrid|office"], "only_home_city": true/false, \
+"strict_format": true/false, "city": "город", "level": "intern|junior|middle|senior|lead", \
+"relocation": true/false, "relocation_countries": ["ISO-коды из BY RU KZ GE PL"], \
+"salary_usd": число в $ в месяц, "wishes": "район, метро, график и прочее, что не влезло в поля", \
+"directions_add": ["поисковые запросы"], "directions_remove": ["запросы"], \
+"exclude_add": ["стоп-слова"], "unclear": "что непонятно, если просьба неясна"}
+«Только гибрид» → work_formats ["hybrid"]. Район или метро → wishes и only_home_city: true.
+Текущий профиль: """
 
 LETTER_SYSTEM = """Напиши сопроводительное письмо к вакансии от лица кандидата, на языке \
 вакансии, до 900 символов. Конкретно: 2–3 факта из профиля, которые закрывают требования \
 вакансии. Без шаблонных фраз и выдуманных фактов. Только текст письма.
-
-Профиль кандидата:
 """
 
 
@@ -133,8 +149,8 @@ def salvage_json(text: str) -> dict[str, Any] | None:
     return found if "score" in found else None
 
 
-def profiles_hash(resumes: list[Resume]) -> str:
-    raw = "\n".join(f"{r.id}:{r.profile}" for r in resumes)
+def profiles_hash(resumes: list[Resume], context: str = "") -> str:
+    raw = context + "\n" + "\n".join(f"{r.id}:{r.profile}" for r in resumes)
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
 
@@ -148,6 +164,10 @@ def vacancy_prompt(v: Vacancy, description: str) -> str:
         f"Компания: {v.company or '—'}",
         f"Локация: {v.location or '—'}{' (удалённо)' if v.remote else ''}",
     ]
+    if v.address:
+        head.append(f"Адрес: {v.address}")
+    if v.work_formats:
+        head.append("Формат: " + ", ".join(v.work_formats))
     if v.salary_text():
         head.append(f"Зарплата: {v.salary_text()}")
     if v.level:
@@ -217,7 +237,7 @@ class AIService:
                     user,
                     PROFILE_SYSTEM,
                     redact_contacts(resume.text),
-                    max_tokens=500,
+                    max_tokens=800,
                     json_mode=True,
                 )
             )
@@ -238,13 +258,15 @@ class AIService:
         )
         self.db.set_resume_profile(resume.id, profile)
         resume.profile = profile
+        # всё, что удалось понять о человеке, дополняет его профиль соискателя
+        user_profile = self.db.get_profile(user.id)
+        user_profile.merge_extracted(data)
+        self.db.save_profile(user.id, user_profile)
         summary = escape(str(data.get("summary") or ""))
         return (
-            f"✅ Профиль «{escape(resume.title)}» готов:\n\n"
+            f"✅ Резюме «{escape(resume.title)}» разобрано:\n\n"
             f"<i>{summary}</i>\n\n"
-            f"🧩 Навыки: {escape(', '.join(skills)) or '—'}\n"
-            "По этим навыкам вакансии отбираются бесплатно, до ИИ.\n"
-            "Ещё резюме — просто пришлите файл. Список: /resumes"
+            f"🧩 Навыки: {escape(', '.join(skills)) or '—'}"
         )
 
     # --- оценка --------------------------------------------------------------
@@ -254,7 +276,8 @@ class AIService:
         resumes = self.shortlist(self.profiled(user), vacancy)
         if not resumes:
             return None
-        key = profiles_hash(resumes)
+        context = self.db.get_profile(user.id).context_line()
+        key = profiles_hash(resumes, context)
         cached = self.db.get_ai_cache(vacancy.uid, key)
         if cached:
             return Analysis(**json.loads(cached))
@@ -267,7 +290,8 @@ class AIService:
             try:
                 text = await self._ask(
                     user,
-                    EVAL_SYSTEM + profiles_block(resumes),
+                    f"{EVAL_SYSTEM}\nКандидат: {context}\n\nРезюме кандидата:\n"
+                    + profiles_block(resumes),
                     vacancy_prompt(vacancy, description),
                     # с запасом: оплачиваются только реально сгенерированные токены,
                     # а обрезанный посередине JSON — это выброшенный запрос
@@ -305,6 +329,35 @@ class AIService:
         chosen = analysis and next((r for r in resumes if r.id == analysis.resume_id), None)
         return chosen or resumes[0]
 
+    # --- правка профиля словами ---------------------------------------------
+
+    async def parse_profile_edit(self, user: User, text: str) -> dict[str, Any] | None:
+        """Фраза пользователя → правка профиля (JSON). None — лимит или ошибка ИИ."""
+        if not self.has_budget(user):
+            return None
+        profile = self.db.get_profile(user.id)
+        current = json.dumps(
+            {
+                "city": profile.city,
+                "work_formats": profile.work_formats,
+                "only_home_city": profile.only_home_city,
+                "level": profile.level,
+                "relocation": profile.relocation,
+                "salary_usd": profile.salary_usd,
+                "wishes": profile.wishes,
+                "directions": user.filters.queries,
+            },
+            ensure_ascii=False,
+        )
+        try:
+            reply = await self._ask(
+                user, PROFILE_EDIT_SYSTEM + current, text[:500], max_tokens=300, json_mode=True
+            )
+            return parse_json(reply)
+        except LLMError as exc:
+            log.warning("profile edit for %s failed: %s", user.id, exc)
+            return None
+
     # --- письмо --------------------------------------------------------------
 
     async def cover_letter(self, user: User, vacancy: Vacancy, resume: Resume) -> str:
@@ -314,7 +367,8 @@ class AIService:
         try:
             return await self._ask(
                 user,
-                LETTER_SYSTEM + (resume.profile or redact_contacts(resume.text[:3000])),
+                f"{LETTER_SYSTEM}\nКандидат: {self.db.get_profile(user.id).context_line()}\n"
+                f"Профиль кандидата:\n{resume.profile or redact_contacts(resume.text[:3000])}",
                 vacancy_prompt(vacancy, description),
                 max_tokens=600,
                 temperature=0.5,

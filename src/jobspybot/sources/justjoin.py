@@ -49,6 +49,7 @@ class JustJoin(Source):
         )
         hourly = salary.get("unit") == "hour"
         slug = item.get("slug") or item.get("guid")
+        workplace = item.get("workplaceType") or ""
         return Vacancy(
             source=self.name,
             external_id=str(slug),
@@ -57,7 +58,9 @@ class JustJoin(Source):
             company=item.get("companyName", ""),
             location=item.get("city", ""),
             country="PL",
-            remote=item.get("workplaceType") == "remote",
+            remote=workplace == "remote",
+            work_formats=(workplace,) if workplace in ("remote", "hybrid", "office") else (),
+            address=", ".join(filter(None, [item.get("street"), item.get("city")])),
             # почасовые ставки приводим к месяцу (≈168 ч), чтобы фильтр по зарплате был честным
             salary_from=_monthly(salary.get("from"), hourly),
             salary_to=_monthly(salary.get("to"), hourly),

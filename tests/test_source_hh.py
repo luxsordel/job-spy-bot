@@ -57,3 +57,12 @@ def test_hh_requires_token():
     http = make_http(lambda r: httpx.Response(200))
     assert "hh_by" not in build_sources(http, Settings())
     assert "hh_by" in build_sources(http, Settings(hh_app_token="x"))
+
+
+async def test_hh_work_formats_and_address(settings):
+    http = make_http(lambda r: httpx.Response(200, json=fixture_json("hh_search.json")))
+    first, second = await HHBelarus(http, settings).search("python")
+    await http.aclose()
+    assert first.work_formats == ("remote", "hybrid") and first.remote
+    assert first.address == "Минск, улица Притыцкого, 29 (м. Спортивная, Пушкинская)"
+    assert second.work_formats == ("office",) and not second.remote

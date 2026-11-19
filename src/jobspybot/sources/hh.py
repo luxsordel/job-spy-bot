@@ -16,6 +16,8 @@ from jobspybot.text import html_to_text, parse_iso
 
 API = "https://api.hh.ru"
 
+_FORMATS = {"REMOTE": "remote", "HYBRID": "hybrid", "ON_SITE": "office", "FIELD_WORK": "office"}
+
 _EXPERIENCE = {
     "noExperience": Level.JUNIOR,
     "between1And3": Level.MIDDLE,
@@ -70,9 +72,15 @@ class _HHBase(Source):
         area = item.get("area") or {}
         snippet = item.get("snippet") or {}
         exp = (item.get("experience") or {}).get("id")
-        work_formats = {f.get("id") for f in item.get("work_format") or []}
+        formats = tuple(
+            dict.fromkeys(
+                _FORMATS[f["id"]] for f in item.get("work_format") or [] if f.get("id") in _FORMATS
+            )
+        )
         schedule = (item.get("schedule") or {}).get("id")
-        remote = "REMOTE" in work_formats or schedule == "remote"
+        if not formats and schedule == "remote":
+            formats = ("remote",)
+        remote = "remote" in formats
         return Vacancy(
             source=self.name,
             external_id=str(item["id"]),
@@ -90,6 +98,8 @@ class _HHBase(Source):
                 " ".join(filter(None, [snippet.get("requirement"), snippet.get("responsibility")]))
             ),
             published_at=parse_iso(item.get("published_at")),
+            work_formats=formats,
+            address=_address(item.get("address")),
         )
 
     async def fetch_description(self, vacancy: Vacancy) -> str:
@@ -97,6 +107,21 @@ class _HHBase(Source):
         skills = ", ".join(s["name"] for s in data.get("key_skills") or [] if s.get("name"))
         text = html_to_text(data.get("description"))
         return f"{text}\n\nКлючевые навыки: {skills}" if skills else text
+
+
+def _address(addr: dict[str, Any] | None) -> str:
+    if not addr:
+        return ""
+    street = addr.get("raw") or ", ".join(
+        filter(None, [addr.get("city"), addr.get("street"), addr.get("building")])
+    )
+    stations = [m.get("station_name") for m in addr.get("metro_stations") or []]
+    if not stations and (addr.get("metro") or {}).get("station_name"):
+        stations = [addr["metro"]["station_name"]]
+    metro = ", ".join(dict.fromkeys(s for s in stations if s))
+    return (
+        f"{street} (м. {metro})" if street and metro else street or (f"м. {metro}" if metro else "")
+    )
 
 
 @register

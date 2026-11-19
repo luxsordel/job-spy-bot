@@ -12,6 +12,7 @@ from pathlib import Path
 
 from jobspybot.filters import UserFilters
 from jobspybot.models import Vacancy
+from jobspybot.profile import UserProfile
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS vacancies (
@@ -76,6 +77,12 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     day      TEXT NOT NULL,
     tokens   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, day)
+);
+
+-- профиль соискателя (JSON, см. profile.py)
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id  INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    data     TEXT NOT NULL
 );
 
 -- оплаты Telegram Stars (первые и автопродления)
@@ -527,3 +534,17 @@ class Database:
                 "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE currency = 'XTR'"
             ).fetchone()[0],
         }
+
+    # --- профиль ---------------------------------------------------------------
+
+    def get_profile(self, user_id: int) -> UserProfile:
+        row = self.conn.execute("SELECT data FROM profiles WHERE user_id = ?", (user_id,))
+        found = row.fetchone()
+        return UserProfile.from_json(found[0] if found else None)
+
+    def save_profile(self, user_id: int, profile: UserProfile) -> None:
+        self.conn.execute(
+            "INSERT INTO profiles(user_id, data) VALUES (?, ?)"
+            " ON CONFLICT(user_id) DO UPDATE SET data = excluded.data",
+            (user_id, profile.to_json()),
+        )

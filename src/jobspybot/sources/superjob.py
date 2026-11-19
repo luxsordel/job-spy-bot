@@ -15,7 +15,7 @@ API = "https://api.superjob.ru/2.0"
 
 # experience.id: 1 — без опыта, 2 — от 1 года, 3 — от 3 лет, 4 — от 6 лет
 _EXPERIENCE = {1: Level.JUNIOR, 2: Level.MIDDLE, 3: Level.SENIOR, 4: Level.LEAD}
-_REMOTE_PLACE_ID = 2  # place_of_work.id: 2 — удалённая работа
+_REMOTE_PLACE_ID = 2  # place_of_work.id: 1 — у работодателя, 2 — удалённо, 3 — разъездная
 
 
 @register
@@ -49,6 +49,10 @@ class SuperJob(Source):
 
     def parse_item(self, item: dict[str, Any]) -> Vacancy:
         ts = item.get("date_published")
+        place = (item.get("place_of_work") or {}).get("id")
+        formats = (
+            ("remote",) if place == _REMOTE_PLACE_ID else ("office",) if place in (1, 3) else ()
+        )
         return Vacancy(
             source=self.name,
             external_id=str(item["id"]),
@@ -57,7 +61,9 @@ class SuperJob(Source):
             company=item.get("firm_name") or "",
             location=(item.get("town") or {}).get("title", ""),
             country="RU",
-            remote=(item.get("place_of_work") or {}).get("id") == _REMOTE_PLACE_ID,
+            remote=place == _REMOTE_PLACE_ID,
+            work_formats=formats,
+            address=item.get("address") or "",
             salary_from=item.get("payment_from") or None,
             salary_to=item.get("payment_to") or None,
             currency=normalize_currency(item.get("currency")),

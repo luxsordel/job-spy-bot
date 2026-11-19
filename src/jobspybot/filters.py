@@ -71,6 +71,14 @@ class UserFilters:
     skills: list[str] = field(default_factory=list)  # для локального скоринга
     min_local_score: int = 25
     ai_threshold: int = 60
+    #: допустимые форматы работы (remote / hybrid / office); пусто — любые
+    formats: list[str] = field(default_factory=list)
+    #: скрывать вакансии, где площадка не указала формат
+    strict_format: bool = False
+    #: офис и гибрид — только в своём городе (вакансии в стране проживания)
+    only_home_city: bool = False
+    home_city: str = ""
+    home_country: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -121,6 +129,9 @@ def check(
     if f.remote_only and v.remote is not True:
         return "не удалёнка"
 
+    if reason := format_reason(v, f):
+        return reason
+
     remote_ok = bool(v.remote) and "REMOTE" in f.countries
     if f.countries and v.country and v.country not in f.countries and not remote_ok:
         return f"страна {v.country}"
@@ -132,6 +143,57 @@ def check(
                 return "не указана зарплата"
         elif usd < f.min_salary_usd:
             return f"зарплата ≈{usd:.0f}$"
+    return None
+
+
+#: русские и латинские написания городов — площадки пишут по-разному
+CITY_ALIASES: dict[str, tuple[str, ...]] = {
+    "минск": ("минск", "minsk", "mińsk"),
+    "гомель": ("гомель", "gomel", "homel"),
+    "гродно": ("гродно", "grodno", "hrodna"),
+    "брест": ("брест", "brest"),
+    "витебск": ("витебск", "vitebsk"),
+    "могилев": ("могилев", "mogilev", "mahilyow"),
+    "москва": ("москва", "moscow"),
+    "санкт-петербург": ("санкт-петербург", "петербург", "спб", "saint petersburg"),
+    "варшава": ("варшава", "warszawa", "warsaw"),
+    "краков": ("краков", "kraków", "krakow"),
+    "вроцлав": ("вроцлав", "wrocław", "wroclaw"),
+    "гданьск": ("гданьск", "gdańsk", "gdansk", "trójmiasto"),
+    "познань": ("познань", "poznań", "poznan"),
+    "лодзь": ("лодзь", "łódź", "lodz"),
+    "тбилиси": ("тбилиси", "tbilisi"),
+    "батуми": ("батуми", "batumi"),
+    "алматы": ("алматы", "almaty", "алма-ата"),
+    "астана": ("астана", "astana"),
+}
+
+
+def city_variants(city: str) -> tuple[str, ...]:
+    key = _norm(city.strip())
+    for canon, variants in CITY_ALIASES.items():
+        if key == canon or key in variants:
+            return variants
+    return (key,) if key else ()
+
+
+def format_reason(v: Vacancy, f: UserFilters) -> str | None:
+    """Проверка формата работы и города. None — подходит."""
+    formats = set(v.work_formats) or ({"remote"} if v.remote else set())
+    if f.formats:
+        if formats and not formats & set(f.formats):
+            return "формат " + "/".join(sorted(formats))
+        if not formats and f.strict_format:
+            return "формат не указан"
+    if f.only_home_city and f.home_city and formats != {"remote"}:
+        same_country = not v.country or not f.home_country or v.country == f.home_country
+        place = _norm(f"{v.location} {v.address}")
+        if (
+            same_country
+            and place.strip()
+            and not any(alias in place for alias in city_variants(f.home_city))
+        ):
+            return f"не в г. {f.home_city}"
     return None
 
 

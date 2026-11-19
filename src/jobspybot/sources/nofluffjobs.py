@@ -48,6 +48,12 @@ class NoFluffJobs(Source):
         salary = item.get("salary") or {}
         seniority = [s.lower() for s in item.get("seniority") or []]
         posted = item.get("posted")
+        place_type = {"remote": "remote", "hybrid": "hybrid", "onsite": "office"}.get(
+            location.get("type") or ""
+        )
+        formats = ("remote",) if location.get("fullyRemote") else ()
+        if place_type and place_type not in formats:
+            formats = (*formats, place_type)
         # B2B-ставки бывают почасовыми — приводим к месяцу (≈168 ч)
         k = 168 if (salary.get("period") or "").lower() == "hour" else 1
         return Vacancy(
@@ -58,7 +64,8 @@ class NoFluffJobs(Source):
             company=item.get("name", ""),
             location=", ".join(dict.fromkeys(cities)),
             country="PL",
-            remote=bool(location.get("fullyRemote")),
+            remote="remote" in formats,
+            work_formats=formats,
             salary_from=int(salary["from"] * k) if salary.get("from") else None,
             salary_to=int(salary["to"] * k) if salary.get("to") else None,
             currency=normalize_currency(salary.get("currency")),
