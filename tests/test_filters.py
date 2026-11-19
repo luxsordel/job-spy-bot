@@ -141,3 +141,22 @@ def test_level_from_title_beats_source_estimate():
     assert lvl("Python-разработчик") is None
     assert title_levels("Главный (Senior) инженер") == {"senior", "lead"}
     assert title_levels("Валидация данных, Midnight") == set()
+
+
+@pytest.mark.parametrize(
+    ("kw", "passes"),
+    [
+        ({"remote": True}, True),
+        ({}, True),  # формат не указан — может, договорятся об удалёнке
+        ({"work_formats": ("hybrid",)}, True),
+        ({"work_formats": ("office", "remote")}, True),
+        ({"work_formats": ("office",)}, False),
+        ({"remote": False}, False),
+    ],
+)
+def test_remote_any_country_cuts_only_strict_office(kw, passes):
+    filters = UserFilters(countries=["BY", "REMOTE"])
+    reason = check(vac(country="RU", **kw), filters, now=NOW)
+    assert (reason is None) is passes
+    # без «удалёнки из любой страны» чужая страна режется как раньше
+    assert "страна RU" in check(vac(country="RU", **kw), UserFilters(countries=["BY"]), now=NOW)
