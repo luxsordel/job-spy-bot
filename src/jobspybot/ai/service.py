@@ -59,6 +59,10 @@ EVAL_SYSTEM = """Ты оцениваешь, насколько вакансия 
 Учитывай гражданство и обстоятельства кандидата (строка «Кандидат»): если вакансия для него \
 недоступна или рискованна (нужно гражданство/разрешение на работу без визовой поддержки, только \
 резиденты страны, ограничения по гражданству, не тот формат работы), отметь это в "by".
+После «ищет:» в строке «Кандидат» — роли, на которые он хочет откликаться. Если вакансия — \
+другая профессия (например, бизнес-аналитик, продажи или поддержка для того, кто ищет \
+разработку или тестирование), ставь score не выше 20, даже если в тексте встречаются те же \
+слова (AI, Python).
 Ответь только JSON:
 {"best": номер резюме, "score": 0-100, "by": "ok|risk|no", "verdict": "до 90 символов", \
 "pros": ["до 2 пунктов по 50 символов"], "cons": ["до 2 пунктов по 50 символов"], \
@@ -247,7 +251,36 @@ class AIService:
         return [r for r in resumes if r.id in top]  # стабильный порядок — стабильный кэш
 
     def is_ready(self, user: User) -> bool:
-        return bool(self.profiled(user))
+        """Есть по чему оценивать: разобранное резюме или хотя бы профиль и направления."""
+        return bool(self.profiled(user)) or bool(user.filters.queries)
+
+    def candidate_profiles(self, user: User) -> list[Resume]:
+        """Разобранные резюме, а без них — профиль соискателя вместо резюме.
+
+        Иначе человек со слабым или не разобранным резюме получал бы вакансии вообще без
+        оценки ИИ — всё подряд, где встретилось слово из запроса.
+        """
+        resumes = self.profiled(user)
+        if resumes:
+            return resumes
+        p = self.db.get_profile(user.id)
+        data = {
+            "summary": p.headline or "резюме нет или оно не разобрано",
+            "level": ", ".join(p.target_levels()),
+            "skills": (p.skills or user.filters.skills)[:20],
+            "wants": p.wishes,
+        }
+        return [
+            Resume(
+                id=0,
+                user_id=user.id,
+                title="Профиль",
+                text="",
+                profile=json.dumps(data, ensure_ascii=False),
+                file_id=None,
+                file_name=None,
+            )
+        ]
 
     async def build_profile(self, user: User, resume: Resume) -> str:
         """Хук для бота: вызывается после загрузки резюме, возвращает ответ пользователю."""
@@ -295,10 +328,10 @@ class AIService:
 
     async def evaluate(self, user: User, vacancy: Vacancy) -> Analysis | None:
         """Оценка вакансии и выбор лучшего резюме. None — нет профилей, лимит или ошибка."""
-        resumes = self.shortlist(self.profiled(user), vacancy)
-        if not resumes:
-            return None
+        resumes = self.shortlist(self.candidate_profiles(user), vacancy)
         context = self.db.get_profile(user.id).context_line()
+        if user.filters.queries:
+            context += "; ищет: " + ", ".join(user.filters.queries[:10])
         key = profiles_hash(resumes, context)
         cached = self.db.get_ai_cache(vacancy.uid, key)
         if cached:
@@ -336,7 +369,7 @@ class AIService:
             return None
         analysis = Analysis.from_data(data)
         best = resumes[analysis.best - 1] if 1 <= analysis.best <= len(resumes) else resumes[0]
-        analysis.resume_id = best.id
+        analysis.resume_id = best.id or None
         if len(resumes) > 1:
             analysis.resume_title = best.title
         self.db.set_ai_cache(vacancy.uid, key, json.dumps(asdict(analysis), ensure_ascii=False))
