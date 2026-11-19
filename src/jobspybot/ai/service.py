@@ -28,7 +28,7 @@ from jobspybot import feedback
 from jobspybot.ai.client import LLMClient, LLMError, parse_json
 from jobspybot.ai.compress import compress_description
 from jobspybot.config import AISettings
-from jobspybot.db import Database, Resume, User
+from jobspybot.db import Database, Resume, User, utcnow
 from jobspybot.filters import LEVEL_TITLES, local_score
 from jobspybot.models import Vacancy
 from jobspybot.resume_files import redact_contacts
@@ -47,6 +47,8 @@ PROFILE_SYSTEM = """Разбери резюме для автоматическ�
 "experience_years": число лет практического опыта, \
 "skills": ["до 20 технологий/навыков в нижнем регистре"], \
 "languages": ["язык и уровень"], \
+"education": ["каждое образование отдельной строкой: учебное заведение, специальность, \
+год окончания или «не окончено»; курсы тоже"], \
 "city": "город проживания", "country": "страна проживания, ISO-код из 2 букв", \
 "citizenship": "гражданство, ISO-код из 2 букв, если указано", \
 "work_formats": ["remote|hybrid|office — только если в резюме указано"], \
@@ -199,12 +201,43 @@ class AIService:
         self.token_limit: Callable[[User], int] = lambda _user: settings.daily_tokens_per_user
         #: оповещение админу (ключ для дедупликации, текст) — подключается в app.py
         self.on_alert: Callable[[str, str], Any] | None = None
+        #: кому отдаётся резерв общего бюджета (Pro) — подключается в app.py
+        self.is_priority: Callable[[User], bool] = lambda _user: False
         self._failures = 0
 
     # --- бюджет --------------------------------------------------------------
 
     def has_budget(self, user: User) -> bool:
-        return self.db.tokens_today(user.id) < self.token_limit(user)
+        if self.db.tokens_today(user.id) >= self.token_limit(user):
+            return False
+        return self.global_budget_allows(user)
+
+    def global_budget_allows(self, user: User) -> bool:
+        """Общий дневной бюджет бота; последние `pro_reserve_pct` % — только для Pro."""
+        total = self.settings.daily_tokens_total
+        if not total:
+            return True
+        spent = self.db.tokens_since(utcnow().date().isoformat())
+        if spent >= total:
+            self._budget_alert("исчерпан — ИИ выключен до полуночи UTC", spent, total)
+            return False
+        reserve_from = total * (100 - self.settings.pro_reserve_pct) // 100
+        if spent >= reserve_from and not self.is_priority(user):
+            self._budget_alert(
+                f"израсходовано {100 - self.settings.pro_reserve_pct} % — остаток только для Pro",
+                spent,
+                total,
+            )
+            return False
+        return True
+
+    def _budget_alert(self, what: str, spent: int, total: int) -> None:
+        if self.on_alert:
+            # ключ с датой — не чаще раза в день на каждый порог
+            key = f"ai-budget:{what[:10]}:{utcnow().date().isoformat()}"
+            self.on_alert(
+                key, f"🤖 Общий дневной бюджет ИИ {what} ({spent:,} из {total:,} токенов)"
+            )
 
     def _provider_failed(self, exc: LLMError) -> None:
         """Подряд несколько ошибок или кончились деньги — сообщить админу."""
@@ -221,9 +254,14 @@ class AIService:
         try:
             reply = await self.llm.chat(system, prompt, **kw)
         except LLMError as exc:
-            if not str(exc).startswith(("no JSON", "bad JSON", "JSON is not")):
-                self._provider_failed(exc)
-            raise
+            if str(exc).startswith(("no JSON", "bad JSON", "JSON is not")):
+                raise
+            self._provider_failed(exc)
+            fallback = self.settings.fallback_model
+            if not fallback or fallback == self.llm.model:
+                raise
+            log.warning("model %s failed (%s), trying %s", self.llm.model, exc, fallback)
+            reply = await self.llm.chat(system, prompt, model=fallback, **kw)
         self._failures = 0
         self.db.add_tokens(user.id, reply.tokens)
         log.debug("llm user=%s tokens=%d", user.id, reply.tokens)
@@ -295,7 +333,7 @@ class AIService:
                     user,
                     PROFILE_SYSTEM,
                     redact_contacts(resume.text),
-                    max_tokens=800,
+                    max_tokens=1000,
                     json_mode=True,
                 )
             )
@@ -310,6 +348,7 @@ class AIService:
                 "level": str(data.get("level") or ""),
                 "skills": skills,
                 "languages": [str(x)[:40] for x in data.get("languages") or []][:5],
+                "education": [str(x)[:120] for x in data.get("education") or []][:4],
                 "wants": str(data.get("wants") or "")[:200],
             },
             ensure_ascii=False,

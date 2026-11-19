@@ -116,3 +116,21 @@ async def test_pipeline_respects_free_plan(billing, db: Database):
     db.set_last_check(2, datetime.now(UTC) - timedelta(hours=4))
     await p.run_cycle()
     assert len(notifier.sent) == FREE.daily_vacancies and notifier.limited == [2]
+
+
+def test_admin_grant_is_not_trial(billing, db):
+    u = user(db)
+    billing.start_trial(u)
+    assert billing.is_trial(u)
+    billing.extend(u, 30)  # админ выдал Pro поверх пробного
+    assert not billing.is_trial(db.get_user(u.id))
+    _key, text = billing.notice(u, u.plan_until - timedelta(hours=12))
+    assert "пробный" not in text
+
+
+def test_old_trial_without_trial_until(billing, db):
+    u = user(db)
+    db.set_plan(u.id, datetime.now(UTC) + timedelta(days=3), trial_used=True)
+    assert billing.is_trial(db.get_user(u.id))  # в пределах пробного срока от регистрации
+    db.set_plan(u.id, datetime.now(UTC) + timedelta(days=60))
+    assert not billing.is_trial(db.get_user(u.id))  # выдан админом до появления trial_until

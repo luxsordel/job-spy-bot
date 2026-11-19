@@ -13,7 +13,8 @@ from jobspybot import __version__
 from jobspybot.admin_web import AdminWeb, Runtime
 from jobspybot.ai.client import LLMClient
 from jobspybot.ai.service import AIService
-from jobspybot.billing import Billing
+from jobspybot.backup import Backups, backup_loop
+from jobspybot.billing import PRO, Billing
 from jobspybot.config import ConfigError, Settings
 from jobspybot.db import Database, User
 from jobspybot.guard import AdminAlerts
@@ -31,6 +32,8 @@ def wire_ai(bot: Bot, ai: AIService) -> None:
     bot.on_resume = ai.build_profile
     bot.on_profile_edit = ai.parse_profile_edit
     ai.token_limit = bot.billing.ai_token_limit
+    # при нехватке общего бюджета ИИ остаток достаётся подписчикам
+    ai.is_priority = lambda user: bot.billing.plan(user) is PRO
 
     async def on_apply(user: User, cb: dict[str, Any], value: str) -> None:
         """Лучшее резюме под вакансию (файлом) + сопроводительное, написанное под него."""
@@ -148,13 +151,31 @@ async def run(settings: Settings, runtime: Runtime | None = None) -> bool:
         tasks = [
             asyncio.create_task(bot.run(stop), name="telegram"),
             asyncio.create_task(pipeline.run_forever(stop), name="pipeline"),
+            asyncio.create_task(pipeline.flush_forever(stop), name="digest"),
             asyncio.create_task(plan_notices(bot, stop), name="billing"),
             asyncio.create_task(alerts.run(bot.notify_admins, stop), name="alerts"),
             asyncio.create_task(maintenance(bot, stop), name="maintenance"),
         ]
+        backups = (
+            Backups(db, settings.backup_dir, settings.backup.keep) if settings.backup.keep else None
+        )
+        if backups:
+            send = bot.send_backup if settings.backup.to_telegram else None
+            tasks.append(
+                asyncio.create_task(
+                    backup_loop(backups, send, settings.backup.hour_utc, stop), name="backup"
+                )
+            )
         if settings.admin_web.enabled:
             web = AdminWeb(
-                settings, db, billing, bot=bot, pipeline=pipeline, alerts=alerts, runtime=runtime
+                settings,
+                db,
+                billing,
+                bot=bot,
+                pipeline=pipeline,
+                alerts=alerts,
+                runtime=runtime,
+                backups=backups,
             )
             tasks.append(asyncio.create_task(web.serve(stop), name="admin-web"))
         await bot.notify_admins(f"🔄 Бот запущен (v{__version__})")

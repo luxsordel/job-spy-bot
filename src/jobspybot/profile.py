@@ -52,6 +52,8 @@ class UserProfile:
     experience_years: float | None = None
     skills: list[str] = field(default_factory=list)
     languages: list[str] = field(default_factory=list)
+    #: образование: «БГУИР, информатика, 2024» или «БНТУ, экономика, не окончено»
+    education: list[str] = field(default_factory=list)
     city: str = ""
     country: str = ""  # где живёт, ISO alpha-2
     citizenship: str = "BY"
@@ -82,7 +84,11 @@ class UserProfile:
         known = {f.name for f in fields(cls)}
         profile = cls(**{k: v for k, v in data.items() if k in known})
         # старые записи могли сохранить мусор (огромную зарплату) — чиним при чтении
+        # и спрашиваем зарплату заново: «отвечено» без суммы быть не может («не важно» — 0)
         profile.salary_usd = safe_salary(profile.salary_usd)
+        if profile.salary_usd is None:
+            profile.answered = [q for q in profile.answered if q != "salary"]
+        profile.education = clean_list(profile.education or [], max_items=4, max_len=120)
         profile.levels = [lv for lv in LEVEL_ORDER if lv in (profile.levels or [])]
         if not isinstance(profile.overrides, dict):
             profile.overrides = {}
@@ -167,6 +173,11 @@ class UserProfile:
             if added:
                 setattr(self, attr, [*current, *added][:limit])
                 changed.append(attr)
+
+        education = str_list("education", 4, item_len=120)
+        if education and not self.education:
+            self.education = education
+            changed.append("education")
 
         formats = [f for f in str_list("work_formats", 3) if f in WORK_FORMATS]
         if formats and not self.work_formats and "work_formats" not in self.answered:

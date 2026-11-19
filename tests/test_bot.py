@@ -4,7 +4,6 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import httpx
-import pytest
 
 from jobspybot.config import BillingSettings, Settings
 from jobspybot.filters import UserFilters
@@ -28,7 +27,10 @@ class FakeTelegram:
         if "/file/" in request.url.path:
             return httpx.Response(200, content=self.files[request.url.path.rsplit("/", 1)[-1]])
         method = request.url.path.rsplit("/", 1)[-1]
-        payload = json.loads(request.content or b"{}")
+        if request.headers.get("content-type", "").startswith("multipart/"):
+            payload = {"multipart": request.read().decode("latin-1")}
+        else:
+            payload = json.loads(request.content or b"{}")
         self.calls.append((method, payload))
         if method == "getFile":
             fid = payload["file_id"]
@@ -47,17 +49,6 @@ class FakeTelegram:
             for m, p in self.calls
             if m == "sendMessage" and (chat_id is None or p["chat_id"] == chat_id)
         ]
-
-
-@pytest.fixture
-def tg():
-    return FakeTelegram()
-
-
-@pytest.fixture
-def bot(db, tg):
-    api = TelegramAPI("TOKEN", transport=httpx.MockTransport(tg))
-    return Bot(api, db, Settings(admin_ids=frozenset({ADMIN})), ["habr", "hh_by", "justjoin"])
 
 
 def message(user_id: int, text: str) -> dict:

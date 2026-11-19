@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS deliveries (
     user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     vacancy_uid  TEXT NOT NULL,
     fingerprint  TEXT NOT NULL,
-    status       TEXT NOT NULL,  -- sent | filtered | ai_rejected | liked | disliked
+    status       TEXT NOT NULL,  -- sent | queued | skipped | filtered | ai_rejected
+                                 -- | liked | disliked
     reason       TEXT NOT NULL DEFAULT '',
     score        INTEGER,
     created_at   TEXT NOT NULL,
@@ -134,6 +135,8 @@ class User:
     banned: bool = False
     last_seen: datetime | None = None
     created_at: datetime | None = None
+    trial_until: datetime | None = None
+    stopped_at: datetime | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> User:
@@ -141,6 +144,8 @@ class User:
             banned=bool(row["banned"]),
             last_seen=_dt(row["last_seen"]),
             created_at=_dt(row["created_at"]),
+            trial_until=_dt(row["trial_until"]),
+            stopped_at=_dt(row["stopped_at"]),
             id=row["id"],
             username=row["username"],
             allowed=bool(row["allowed"]),
@@ -169,6 +174,10 @@ _USER_COLUMNS = [
     ("notified", "TEXT NOT NULL DEFAULT ''"),
     ("banned", "INTEGER NOT NULL DEFAULT 0"),
     ("last_seen", "TEXT"),
+    #: конец пробного периода: Pro дольше — значит, оплачен или выдан админом
+    ("trial_until", "TEXT"),
+    #: когда человек остановил или заблокировал бота (None — бот доступен)
+    ("stopped_at", "TEXT"),
 ]
 
 
@@ -310,6 +319,31 @@ class Database:
             # фильтры поменялись — отсеянное ранее нужно оценить заново
             self.conn.execute(
                 "DELETE FROM deliveries WHERE user_id = ? AND status = 'filtered'", (user_id,)
+            )
+
+    def set_stopped(self, user_id: int, stopped: bool) -> None:
+        """Человек остановил бота (вместе с паузой рассылки) или вернулся."""
+        if stopped:
+            self.conn.execute(
+                "UPDATE users SET stopped_at = ?, paused = 1 WHERE id = ?",
+                (utcnow().isoformat(), user_id),
+            )
+        else:
+            self.conn.execute("UPDATE users SET stopped_at = NULL WHERE id = ?", (user_id,))
+
+    def reset_setup(self, user_id: int) -> None:
+        """«Начать заново»: стирает резюме, профиль и фильтры, онбординг — с начала.
+
+        Остаются доступ, подписка, история вакансий (чтобы не прислать их повторно)
+        и счётчики (лимит загрузок нельзя обнулить перезапуском).
+        """
+        with self.conn:
+            for table in ("resumes", "profiles"):
+                self.conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+            self.conn.execute(
+                "UPDATE users SET filters = '{}', resume = '', profile = '', paused = 0,"
+                " onboarded = 0, stopped_at = NULL, last_check = NULL WHERE id = ?",
+                (user_id,),
             )
 
     def set_banned(self, user_id: int, banned: bool) -> None:
@@ -472,6 +506,30 @@ class Database:
         ).fetchone()
         return self.get_vacancy(row[0]) if row else None
 
+    def queued(self, user_id: int) -> list[tuple[int, Vacancy, str, int | None]]:
+        """Отложенные вакансии (тихие часы, дайджест): rowid, вакансия, оценка ИИ, балл.
+
+        Вакансии, удалённые из базы за старостью, сразу помечаются пропущенными.
+        """
+        rows = self.conn.execute(
+            "SELECT d.rowid AS rowid, d.reason, d.score, v.data FROM deliveries d"
+            " LEFT JOIN vacancies v ON v.uid = d.vacancy_uid"
+            " WHERE d.user_id = ? AND d.status = 'queued' ORDER BY d.created_at",
+            (user_id,),
+        ).fetchall()
+        out = []
+        for row in rows:
+            if row["data"] is None:
+                self.set_status(user_id, row["rowid"], "skipped")
+                continue
+            vacancy = Vacancy.from_dict(json.loads(row["data"]))
+            out.append((row["rowid"], vacancy, row["reason"], row["score"]))
+        return out
+
+    def users_with_queue(self) -> list[int]:
+        rows = self.conn.execute("SELECT DISTINCT user_id FROM deliveries WHERE status = 'queued'")
+        return [r[0] for r in rows]
+
     def set_status(self, user_id: int, delivery_id: int, status: str) -> None:
         self.conn.execute(
             "UPDATE deliveries SET status = ? WHERE user_id = ? AND rowid = ?",
@@ -536,6 +594,14 @@ class Database:
         assert cur.lastrowid is not None
         return cur.lastrowid
 
+    def find_resume(self, user_id: int, text: str) -> Resume | None:
+        """Уже загруженное резюме с тем же текстом (повторная отправка того же файла)."""
+        row = self.conn.execute(
+            "SELECT * FROM resumes WHERE user_id = ? AND text = ? ORDER BY id LIMIT 1",
+            (user_id, text),
+        ).fetchone()
+        return Resume.from_row(row) if row else None
+
     def set_resume_profile(self, resume_id: int, profile: str) -> None:
         self.conn.execute("UPDATE resumes SET profile = ? WHERE id = ?", (profile, resume_id))
 
@@ -562,6 +628,11 @@ class Database:
             "UPDATE users SET plan_until = ?, notified = '',"
             " trial_used = COALESCE(?, trial_used) WHERE id = ?",
             (until.isoformat(), None if trial_used is None else int(trial_used), user_id),
+        )
+
+    def set_trial_until(self, user_id: int, until: datetime) -> None:
+        self.conn.execute(
+            "UPDATE users SET trial_until = ? WHERE id = ?", (until.isoformat(), user_id)
         )
 
     def set_subscription(self, user_id: int, charge_id: str | None) -> None:
@@ -604,7 +675,7 @@ class Database:
         day = utcnow().date().isoformat()
         row = self.conn.execute(
             "SELECT COUNT(*) FROM deliveries WHERE user_id = ?"
-            " AND status IN ('sent', 'liked', 'disliked') AND created_at >= ?",
+            " AND status IN ('sent', 'liked', 'disliked', 'queued') AND created_at >= ?",
             (user_id, day),
         ).fetchone()
         return row[0]
