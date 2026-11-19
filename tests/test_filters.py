@@ -118,3 +118,26 @@ def test_home_city_filter():
     assert check(vac(location="Warszawa", country="PL"), f, now=NOW) is None
     # адрес тоже считается
     assert check(vac(location="", address="г. Минск, ул. Притыцкого"), f, now=NOW) is None
+
+
+def test_level_from_title_beats_source_estimate():
+    """Регрессия: hh выводит уровень из опыта и превращал «Junior Backend» в middle."""
+    from jobspybot.filters import title_levels
+
+    f = UserFilters(levels=["intern", "junior"])
+
+    def lvl(title, level=None):
+        v = Vacancy(source="hh_ru", external_id="1", title=title, url="u", level=level)
+        return check(v, f)
+
+    assert lvl("Junior Backend-разработчик (Python, FastAPI)", Level.MIDDLE) is None
+    assert lvl("Python Backend Junior+/Strong Junior разработчик", Level.SENIOR) is None
+    assert lvl("Младший разработчик (Java)", Level.MIDDLE) is None
+    assert lvl("Стажёр-разработчик", Level.MIDDLE) is None
+    assert lvl("Fullstack-разработчик (Middle+ / Senior)") == "уровень middle/senior"
+    assert lvl("Senior Data Engineer") == "уровень senior"
+    assert lvl("Lead AI Engineer, Databricks") == "уровень lead"
+    assert lvl("Python-разработчик", Level.MIDDLE) == "уровень middle"  # в названии нет — площадка
+    assert lvl("Python-разработчик") is None
+    assert title_levels("Главный (Senior) инженер") == {"senior", "lead"}
+    assert title_levels("Валидация данных, Midnight") == set()

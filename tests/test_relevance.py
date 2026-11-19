@@ -114,3 +114,43 @@ async def test_ai_scores_by_profile_when_resume_is_missing(db):
     system = fake.requests[0]["messages"][0]["content"]
     assert "ищет: вайбкодер, тестировщик" in system and "Вайбкодер, ручное" in system
     assert "другая профессия" in system
+
+
+# --- реальные вакансии из выдачи тестировщика (19.11.2026) -------------------------
+
+MISHA = user_families(
+    [
+        "AI-native разработчик",
+        "разработчик ИИ-агентов",
+        "junior backend разработчик Python",
+        "junior разработчик приложений Android Kotlin",
+    ],
+    ["ии-агенты", "fastapi", "python", "react", "react native", "kotlin", "тестирование"],
+)
+
+
+@pytest.mark.parametrize(
+    ("title", "fit"),
+    [
+        # прислались без ИИ, и он их скрыл 👎
+        ("QA Automation Engineer (C#) / Fullstack QA", Fit.MISMATCH),
+        ("Инженер по тестированию", Fit.MISMATCH),
+        ("Продуктовый аналитик", Fit.MISMATCH),
+        ("Главный (Senior) инженер DevOps в команду развития", Fit.MISMATCH),
+        ("Менеджер по развитию бизнеса (Салют для Бизнеса)", Fit.MISMATCH),
+        ("Go-разработчик, Ozon Fresh", Fit.MISMATCH),
+        # его роли
+        ("Junior Backend-разработчик (Python, FastAPI)", Fit.MATCH),
+        ("AI Engineer (Разработчик ИИ-ботов / ИИ-агентов)", Fit.MATCH),
+        ("Стажер-разработчик ИИ-инструментов", Fit.MATCH),
+        ("Junior Frontend разработчик (React)", Fit.MATCH),
+        ("Fullstack Python-разработчик (FastAPI/Django + React или Vue)", Fit.MATCH),
+    ],
+)
+def test_misha_real_titles(title, fit):
+    assert role_fit(title, MISHA) is fit
+
+
+def test_backend_alone_does_not_pull_every_language():
+    wanted = user_families(["junior backend разработчик"])
+    assert not {"java", "go", "dotnet", "php"} & wanted
