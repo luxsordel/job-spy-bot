@@ -80,6 +80,9 @@ EDITABLE_KEYS = (
     "AI_DAILY_TOKENS_PER_USER",
     "AI_MAX_DESCRIPTION_CHARS",
     "AI_MAX_PER_CYCLE",
+    "AI_DAILY_TOKENS_TOTAL",
+    "AI_PRO_RESERVE_PCT",
+    "AI_FALLBACK_MODEL",
     "RATE_LIMIT_PER_MIN",
     "MAX_UPLOADS_PER_DAY",
     "DELETE_INACTIVE_DAYS",
@@ -134,6 +137,12 @@ class AISettings:
     daily_tokens_per_user: int = 40_000
     max_description_chars: int = 2_500
     max_per_cycle: int = 10
+    #: общий дневной бюджет токенов на весь бот (0 — без общего лимита)
+    daily_tokens_total: int = 0
+    #: последние N % общего бюджета — только для Pro
+    pro_reserve_pct: int = 20
+    #: запасная модель, если основная не отвечает (пусто — нет)
+    fallback_model: str = ""
 
     @property
     def enabled(self) -> bool:
@@ -229,6 +238,9 @@ class Settings:
                 daily_tokens_per_user=_int(env, "AI_DAILY_TOKENS_PER_USER", 40_000),
                 max_description_chars=_int(env, "AI_MAX_DESCRIPTION_CHARS", 2_500),
                 max_per_cycle=_int(env, "AI_MAX_PER_CYCLE", 10),
+                daily_tokens_total=_int(env, "AI_DAILY_TOKENS_TOTAL", 0),
+                pro_reserve_pct=_int(env, "AI_PRO_RESERVE_PCT", 20),
+                fallback_model=env.get("AI_FALLBACK_MODEL", "").strip(),
             ),
             guard=GuardSettings(
                 rate_limit_per_min=_int(env, "RATE_LIMIT_PER_MIN", 30),
@@ -252,6 +264,10 @@ class Settings:
             raise ConfigError("RATE_LIMIT_PER_MIN не может быть меньше 5")
         if settings.billing.access_mode not in ("invite", "open"):
             raise ConfigError("ACCESS_MODE — invite или open")
+        if not 0 <= settings.ai.pro_reserve_pct <= 100:
+            raise ConfigError("AI_PRO_RESERVE_PCT — от 0 до 100")
+        if settings.ai.daily_tokens_total < 0:
+            raise ConfigError("AI_DAILY_TOKENS_TOTAL не может быть отрицательным")
         if settings.poll_interval_min < 5:
             raise ConfigError("POLL_INTERVAL_MIN не может быть меньше 5 — площадки забанят")
         return settings

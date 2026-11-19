@@ -164,6 +164,9 @@ def effective_values(s: Settings) -> dict[str, str]:
         "AI_DAILY_TOKENS_PER_USER": ai.daily_tokens_per_user,
         "AI_MAX_DESCRIPTION_CHARS": ai.max_description_chars,
         "AI_MAX_PER_CYCLE": ai.max_per_cycle,
+        "AI_DAILY_TOKENS_TOTAL": ai.daily_tokens_total,
+        "AI_PRO_RESERVE_PCT": ai.pro_reserve_pct,
+        "AI_FALLBACK_MODEL": ai.fallback_model,
         "RATE_LIMIT_PER_MIN": g.rate_limit_per_min,
         "MAX_UPLOADS_PER_DAY": g.max_uploads_per_day,
         "DELETE_INACTIVE_DAYS": g.inactive_days,
@@ -505,7 +508,7 @@ class AdminWeb:
                 card("Автопродление", _num(s["subscriptions"])),
                 card("Звёзды за месяц", f"{_num(s['stars_month'])} ⭐"),
                 card("Звёзды всего", f"{_num(s['stars_total'])} ⭐"),
-                card("ИИ-токены сегодня", _num(self.db.tokens_since(today))),
+                card("ИИ-токены сегодня", self._ai_today(today)),
                 card("ИИ-токены за месяц", _num(self.db.tokens_since(month))),
             ]
         )
@@ -1113,6 +1116,8 @@ class AdminWeb:
             "stats": self.db.business_stats(),
             "funnel": self.db.funnel(),
             "ai_tokens_today": self.db.tokens_since(utcnow().date().isoformat()),
+            "ai_tokens_month": self.db.tokens_since(utcnow().replace(day=1).date().isoformat()),
+            "ai_daily_tokens_total": self.settings.ai.daily_tokens_total,
             "last_cycle_at": pipe.last_cycle_at if pipe else None,
             "last_cycle": pipe.last_cycle.__dict__ if pipe and pipe.last_cycle else None,
             "sources": {n: st.__dict__ for n, st in pipe.status.items()} if pipe else {},
@@ -1121,6 +1126,13 @@ class AdminWeb:
                 for a in (self.alerts.recent if self.alerts else [])
             ],
         }
+
+    def _ai_today(self, today: str) -> str:
+        spent = self.db.tokens_since(today)
+        total = self.settings.ai.daily_tokens_total
+        if not total:
+            return _num(spent)
+        return f"{_num(spent)} из {_num(total)} ({spent * 100 // total} %)"
 
     def _user_json(self, u: User, *, full: bool = False) -> dict[str, Any]:
         data: dict[str, Any] = {

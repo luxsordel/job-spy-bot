@@ -13,7 +13,7 @@ from jobspybot import __version__
 from jobspybot.admin_web import AdminWeb, Runtime
 from jobspybot.ai.client import LLMClient
 from jobspybot.ai.service import AIService
-from jobspybot.billing import Billing
+from jobspybot.billing import PRO, Billing
 from jobspybot.config import ConfigError, Settings
 from jobspybot.db import Database, User
 from jobspybot.guard import AdminAlerts
@@ -31,6 +31,8 @@ def wire_ai(bot: Bot, ai: AIService) -> None:
     bot.on_resume = ai.build_profile
     bot.on_profile_edit = ai.parse_profile_edit
     ai.token_limit = bot.billing.ai_token_limit
+    # при нехватке общего бюджета ИИ остаток достаётся подписчикам
+    ai.is_priority = lambda user: bot.billing.plan(user) is PRO
 
     async def on_apply(user: User, cb: dict[str, Any], value: str) -> None:
         """Лучшее резюме под вакансию (файлом) + сопроводительное, написанное под него."""

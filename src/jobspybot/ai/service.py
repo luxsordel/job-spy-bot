@@ -27,7 +27,7 @@ from typing import Any
 from jobspybot.ai.client import LLMClient, LLMError, parse_json
 from jobspybot.ai.compress import compress_description
 from jobspybot.config import AISettings
-from jobspybot.db import Database, Resume, User
+from jobspybot.db import Database, Resume, User, utcnow
 from jobspybot.filters import LEVEL_TITLES, local_score
 from jobspybot.models import Vacancy
 from jobspybot.resume_files import redact_contacts
@@ -196,12 +196,43 @@ class AIService:
         self.token_limit: Callable[[User], int] = lambda _user: settings.daily_tokens_per_user
         #: оповещение админу (ключ для дедупликации, текст) — подключается в app.py
         self.on_alert: Callable[[str, str], Any] | None = None
+        #: кому отдаётся резерв общего бюджета (Pro) — подключается в app.py
+        self.is_priority: Callable[[User], bool] = lambda _user: False
         self._failures = 0
 
     # --- бюджет --------------------------------------------------------------
 
     def has_budget(self, user: User) -> bool:
-        return self.db.tokens_today(user.id) < self.token_limit(user)
+        if self.db.tokens_today(user.id) >= self.token_limit(user):
+            return False
+        return self.global_budget_allows(user)
+
+    def global_budget_allows(self, user: User) -> bool:
+        """Общий дневной бюджет бота; последние `pro_reserve_pct` % — только для Pro."""
+        total = self.settings.daily_tokens_total
+        if not total:
+            return True
+        spent = self.db.tokens_since(utcnow().date().isoformat())
+        if spent >= total:
+            self._budget_alert("исчерпан — ИИ выключен до полуночи UTC", spent, total)
+            return False
+        reserve_from = total * (100 - self.settings.pro_reserve_pct) // 100
+        if spent >= reserve_from and not self.is_priority(user):
+            self._budget_alert(
+                f"израсходовано {100 - self.settings.pro_reserve_pct} % — остаток только для Pro",
+                spent,
+                total,
+            )
+            return False
+        return True
+
+    def _budget_alert(self, what: str, spent: int, total: int) -> None:
+        if self.on_alert:
+            # ключ с датой — не чаще раза в день на каждый порог
+            key = f"ai-budget:{what[:10]}:{utcnow().date().isoformat()}"
+            self.on_alert(
+                key, f"🤖 Общий дневной бюджет ИИ {what} ({spent:,} из {total:,} токенов)"
+            )
 
     def _provider_failed(self, exc: LLMError) -> None:
         """Подряд несколько ошибок или кончились деньги — сообщить админу."""
@@ -218,9 +249,14 @@ class AIService:
         try:
             reply = await self.llm.chat(system, prompt, **kw)
         except LLMError as exc:
-            if not str(exc).startswith(("no JSON", "bad JSON", "JSON is not")):
-                self._provider_failed(exc)
-            raise
+            if str(exc).startswith(("no JSON", "bad JSON", "JSON is not")):
+                raise
+            self._provider_failed(exc)
+            fallback = self.settings.fallback_model
+            if not fallback or fallback == self.llm.model:
+                raise
+            log.warning("model %s failed (%s), trying %s", self.llm.model, exc, fallback)
+            reply = await self.llm.chat(system, prompt, model=fallback, **kw)
         self._failures = 0
         self.db.add_tokens(user.id, reply.tokens)
         log.debug("llm user=%s tokens=%d", user.id, reply.tokens)
