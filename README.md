@@ -2,25 +2,139 @@
 
 [![CI](https://github.com/luxsordel/job-spy-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/luxsordel/job-spy-bot/actions/workflows/ci.yml)
 
-Telegram-бот, который следит за вакансиями на площадках Беларуси, России, Казахстана,
-Грузии и Польши, отсеивает лишнее по фильтрам и отправляет подходящие вакансии с кратким
-ИИ-анализом.
+Telegram-бот, который следит за вакансиями на площадках **Беларуси, России, Казахстана, Грузии
+и Польши**, бесплатно отсеивает неподходящие и присылает остальные с кратким ИИ-анализом:
+насколько вакансия подходит под резюме и нет ли ограничений для граждан РБ.
 
-> Проект переписывается с Java на Python, чтобы работать на VPS с маленьким объёмом памяти.
-> Прогресс: [milestone v1.0](https://github.com/luxsordel/job-spy-bot/milestone/1).
-> Java-версия сохранена под тегом [`java-prototype`](https://github.com/luxsordel/job-spy-bot/tree/java-prototype).
+- 🪶 **Лёгкий**: ~50 МБ RAM, две зависимости (`httpx`, `selectolax`), SQLite.
+- 👥 **Многопользовательский**: у каждого свои запросы, фильтры, резюме. Доступ по инвайтам.
+- 🤖 **ИИ без перерасхода**: в модель попадают только вакансии, прошедшие бесплатный отсев.
+  Есть кэш и дневной лимит токенов.
+- 🔌 **Любой OpenAI-совместимый API**: OpenAI, DeepSeek, OpenRouter, Ollama…
 
-## Быстрый старт (разработка)
+## Площадки
 
-```bash
-python -m venv .venv
-. .venv/bin/activate            # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
-cp .env.example .env            # заполнить токены
-python -m jobspybot check-sources "python"
-pytest && ruff check .
+| | Площадка | Способ | Нужен ключ |
+|---|---|---|---|
+| 🇧🇾 | rabota.by | API HeadHunter | `HH_APP_TOKEN` |
+| 🇧🇾 | praca.by | HTML | — |
+| 🇷🇺 | hh.ru | API HeadHunter | `HH_APP_TOKEN` |
+| 🇷🇺 | Habr Карьера | JSON | — |
+| 🇷🇺 | GetMatch | JSON | — |
+| 🇷🇺 | SuperJob | API | `SUPERJOB_API_KEY` |
+| 🇰🇿 | hh.kz | API HeadHunter | `HH_APP_TOKEN` |
+| 🇬🇪 | jobs.ge | HTML | — |
+| 🇵🇱 | justjoin.it | JSON | — |
+| 🇵🇱 | No Fluff Jobs | JSON | — |
+
+Площадки без ключа просто пропускаются. Проверить, что работает:
+`python -m jobspybot check-sources "python developer"`.
+
+> **HeadHunter**: анонимные запросы к API сейчас получают `403`. Зарегистрируйте приложение
+> на [dev.hh.ru](https://dev.hh.ru) и укажите токен приложения в `HH_APP_TOKEN`.
+
+## Как это работает
+
+```mermaid
+flowchart LR
+    A[Площадки] -->|раз в N минут,<br>общие запросы — один раз| B[(SQLite)]
+    B --> C{Жёсткие фильтры<br>стоп-слова, уровень,<br>страна, зарплата}
+    C -->|отсеяно| X[история]
+    C --> D{Локальный скоринг<br>по навыкам}
+    D -->|топ-N| E[ИИ-оценка<br>сжатое описание + профиль]
+    D -->|ИИ выключен| F
+    E -->|балл ≥ порога| F[Telegram]
+    E -->|ниже порога| X
+    F -->|кнопка| G[✉️ Сопроводительное]
 ```
 
-## Лицензия
+### Экономия токенов
 
-MIT
+1. Фильтры и дедупликация бесплатны. На живых данных из 719 вакансий отсев прошли 45.
+2. Локальный скоринг по навыкам выбирает лучших. В ИИ уходит не больше `AI_MAX_PER_CYCLE` за цикл.
+3. Резюме один раз сжимается в профиль примерно на 150 токенов.
+4. Из описания вырезаются блоки «о компании» и «мы предлагаем», дубли и эмодзи, затем текст
+   обрезается. Строки про релокацию, визы и удалёнку сохраняются всегда.
+5. Ответ модели — короткий JSON, `max_tokens=250`.
+6. Кэш (вакансия × профиль) и дневной лимит `AI_DAILY_TOKENS_PER_USER`.
+7. Сопроводительное письмо пишется только по кнопке.
+
+В среднем 1–1,5 тыс. токенов на вакансию.
+
+## Команды бота
+
+| Команда | Что делает |
+|---|---|
+| `/query python developer; django` | поисковые запросы |
+| `/include python, backend` | хотя бы одно слово в названии |
+| `/exclude senior, 1с` | стоп-слова в названии/компании |
+| `/level junior middle` | уровни: intern junior middle senior lead |
+| `/country BY PL REMOTE` | страны; `REMOTE` — удалёнка из любой страны |
+| `/remote` | только удалёнка (переключатель) |
+| `/salary 1500 [strict]` | зарплата от, $; `strict` — скрывать вакансии без зарплаты |
+| `/sources` | включить/выключить площадки |
+| `/skills python, sql` | навыки для локального скоринга (заполняются из резюме) |
+| `/resume` | загрузить резюме текстом или .txt |
+| `/threshold 60` | минимальный балл ИИ |
+| `/settings`, `/stats`, `/pause`, `/unpause` | настройки, статистика, пауза |
+| `/invite`, `/users` | (админ) одноразовая ссылка-приглашение, список пользователей |
+
+Команда без аргумента показывает текущее значение, `-` очищает список.
+
+## Установка на VPS
+
+Нужен Linux с systemd и Python 3.11+ (Debian 12, Ubuntu 24.04).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/luxsordel/job-spy-bot/master/deploy/install.sh | sudo bash
+sudo nano /etc/job-spy-bot/env      # TELEGRAM_BOT_TOKEN, ADMIN_IDS, ключи
+sudo systemctl start job-spy-bot
+journalctl -u job-spy-bot -f
+```
+
+Скрипт создаёт системного пользователя `jobspy` и ставит код в `/opt/job-spy-bot`
+(виртуальное окружение там же). Данные лежат в `/var/lib/job-spy-bot`, конфиг — в `/etc/job-spy-bot/env`.
+Обновление: тот же скрипт ещё раз.
+
+Сервис ограничен `MemoryMax=160M` и работает в песочнице systemd. `MALLOC_ARENA_MAX=2`
+уменьшает фрагментацию памяти glibc.
+
+### Первый запуск
+
+1. Создайте бота у [@BotFather](https://t.me/BotFather) и укажите токен в `TELEGRAM_BOT_TOKEN`.
+2. Свой Telegram id (его покажет [@userinfobot](https://t.me/userinfobot)) укажите в `ADMIN_IDS`.
+3. Для ИИ заполните `AI_BASE_URL`, `AI_API_KEY`, `AI_MODEL`.
+4. Напишите боту `/start`, затем `/query ...` и `/resume`.
+5. Других людей пустить можно двумя способами: `/invite` даёт одноразовую ссылку,
+   а на `/start` от незнакомца придёт кнопка «Пустить».
+
+Все настройки описаны в [`.env.example`](.env.example).
+
+## Разработка
+
+```bash
+python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+cp .env.example .env
+pytest && ruff check . && ruff format --check .
+python -m jobspybot check-sources "python"
+python -m jobspybot run
+```
+
+Структура:
+
+```
+src/jobspybot/
+├── sources/      # площадки: одна площадка — один файл, @register
+├── telegram/     # мини-клиент Bot API, команды, оформление
+├── ai/           # OpenAI-совместимый клиент, сжатие описаний, оценка, письма
+├── filters.py    # бесплатный отсев и локальный скоринг
+├── pipeline.py   # цикл: сбор → отсев → ИИ → рассылка
+├── db.py         # SQLite
+└── app.py        # сборка приложения
+```
+
+Как добавить площадку и как оформлять изменения, описано в [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Java-прототип сохранён под тегом
+[`java-prototype`](https://github.com/luxsordel/job-spy-bot/tree/java-prototype).

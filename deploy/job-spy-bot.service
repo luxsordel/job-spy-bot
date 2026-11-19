@@ -1,0 +1,39 @@
+[Unit]
+Description=job-spy-bot — мониторинг вакансий в Telegram
+Documentation=https://github.com/luxsordel/job-spy-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jobspy
+Group=jobspy
+WorkingDirectory=/var/lib/job-spy-bot
+ExecStart=/opt/job-spy-bot/.venv/bin/python -m jobspybot --env /etc/job-spy-bot/env run
+Restart=on-failure
+RestartSec=30
+
+Environment=PYTHONUNBUFFERED=1
+# glibc по умолчанию создаёт много арен malloc — для маленького VPS это лишние мегабайты
+Environment=MALLOC_ARENA_MAX=2
+
+# Жёсткий потолок памяти: при утечке systemd перезапустит сервис, а не положит сервер
+MemoryHigh=120M
+MemoryMax=160M
+TasksMax=64
+
+# Песочница
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/job-spy-bot
+
+[Install]
+WantedBy=multi-user.target

@@ -8,7 +8,6 @@ version = "1.0.0"
 description = "Telegram-бот для мониторинга вакансий в BY / RU / KZ / GE / PL с ИИ-анализом"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
 authors = [{ name = "luxsordel" }]
 # Зависимости намеренно минимальны: бот должен жить на VPS с маленьким объёмом RAM.
 dependencies = [
@@ -33,6 +32,8 @@ packages = ["src/jobspybot"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# новые версии ruff форматируют и код в Markdown — примеры в документации оставляем как есть
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
