@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from jobspybot.ai.service import Analysis
+from jobspybot.billing import Billing
 from jobspybot.config import Settings
 from jobspybot.db import Database, User
 from jobspybot.filters import check, local_score
@@ -55,12 +56,14 @@ class Pipeline:
         notifier: Notifier,
         settings: Settings,
         evaluator: Evaluator | None = None,
+        billing: Billing | None = None,
     ) -> None:
         self.db = db
         self.sources = sources
         self.notifier = notifier
         self.settings = settings
         self.evaluator = evaluator
+        self.billing = billing
         self._backoff: dict[str, float] = {}
 
     async def describe(self, vacancy: Vacancy) -> str:
@@ -81,13 +84,18 @@ class Pipeline:
 
     # --- сбор ----------------------------------------------------------------
 
+    def queries(self, user: User) -> list[str]:
+        """Запросы пользователя в пределах его тарифа."""
+        qs = user.filters.queries
+        return qs[: self.billing.plan(user).max_queries] if self.billing else qs
+
     def _plan(self, users: list[User]) -> dict[str, set[str]]:
         """Какие запросы на какой площадке нужны (общие запросы разных людей — один раз)."""
         plan: dict[str, set[str]] = defaultdict(set)
         for user in users:
             for name in user.filters.sources or self.sources:
                 if name in self.sources:
-                    for q in user.filters.queries:
+                    for q in self.queries(user):
                         plan[name].add(q.strip().lower())
         return plan
 
@@ -138,7 +146,7 @@ class Pipeline:
         """Прошедшие первичный отсев вакансии с локальным баллом, лучшие — первыми."""
         f = user.filters
         names = set(f.sources or self.sources)
-        queries = {q.strip().lower() for q in f.queries}
+        queries = {q.strip().lower() for q in self.queries(user)}
         pool: dict[str, Vacancy] = {}
         for (name, query), vacancies in found.items():
             if name in names and query in queries:
@@ -193,6 +201,14 @@ class Pipeline:
         self, user: User, found: dict[tuple[str, str], list[Vacancy]], stats: CycleStats
     ) -> None:
         candidates = self.candidates(user, found, stats)
+        remaining = self.billing.remaining_today(user) if self.billing else None
+        if remaining is not None:
+            # дневной лимит тарифа: остальное не записываем — придёт завтра
+            if remaining == 0 and candidates:
+                hook = getattr(self.notifier, "daily_limit_reached", None)
+                if hook:
+                    await hook(user)
+            candidates = candidates[:remaining]
         use_ai = self.evaluator is not None and self.evaluator.is_ready(user)
         if use_ai:
             # дорогой этап — только лучшие по локальному баллу, остальные подождут
@@ -217,6 +233,10 @@ class Pipeline:
     async def run_cycle(self) -> CycleStats:
         stats = CycleStats()
         users = [u for u in self.db.active_users() if u.filters.queries]
+        if self.billing:
+            # бесплатный тариф проверяется реже
+            billing = self.billing
+            users = [u for u in users if billing.is_due(u)]
         if not users:
             return stats
         found = await self.fetch(users, stats)
@@ -225,6 +245,7 @@ class Pipeline:
                 await self.process_user(user, found, stats)
             except Exception:
                 log.exception("processing user %s failed", user.id)
+            self.db.set_last_check(user.id)
         log.info(
             "cycle: fetched=%d new=%d filtered=%d ai=%d ai_rejected=%d sent=%d errors=%s",
             stats.fetched,

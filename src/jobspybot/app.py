@@ -11,6 +11,7 @@ from typing import Any
 
 from jobspybot.ai.client import LLMClient
 from jobspybot.ai.service import AIService
+from jobspybot.billing import Billing
 from jobspybot.config import ConfigError, Settings
 from jobspybot.db import Database, User
 from jobspybot.http import Http
@@ -23,14 +24,19 @@ log = logging.getLogger(__name__)
 
 
 def wire_ai(bot: Bot, ai: AIService) -> None:
-    """Подключает ИИ к боту: профиль из резюме и кнопка «Письмо» под вакансиями."""
+    """Подключает ИИ к боту: профиль из резюме и кнопка «Отклик» под вакансиями."""
     bot.on_resume = ai.build_profile
+    ai.token_limit = bot.billing.ai_token_limit
 
     async def on_apply(user: User, cb: dict[str, Any], value: str) -> None:
         """Лучшее резюме под вакансию (файлом) + сопроводительное, написанное под него."""
         vacancy = bot.db.delivery_vacancy(user.id, int(value)) if value.isdigit() else None
         if vacancy is None:
             await bot.api.answer_callback(cb["id"], "Вакансия уже удалена из базы")
+            return
+        if not bot.billing.plan(user).apply_button:
+            await bot.api.answer_callback(cb["id"], "Отклик с письмом — в 💎 Pro")
+            await bot.show_plan(user)
             return
         resume = await ai.best_resume(user, vacancy)
         if resume is None:
@@ -49,6 +55,17 @@ def wire_ai(bot: Bot, ai: AIService) -> None:
     bot.extra_buttons["cl"] = ("📄 Отклик", on_apply)
 
 
+async def plan_notices(bot: Bot, stop: asyncio.Event, every: float = 1800) -> None:
+    """Напоминания об окончании пробного периода и подписки."""
+    while not stop.is_set():
+        try:
+            await bot.send_plan_notices()
+        except Exception:
+            log.exception("plan notices failed")
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=every)
+
+
 async def run(settings: Settings) -> None:
     if not settings.telegram_token:
         raise ConfigError("не задан TELEGRAM_BOT_TOKEN")
@@ -60,13 +77,20 @@ async def run(settings: Settings) -> None:
     api = TelegramAPI(settings.telegram_token)
     sources = build_sources(http, settings)
     log.info(
+        "access: %s, trial: %d days, Pro: %d stars",
+        settings.billing.access_mode,
+        settings.billing.trial_days,
+        settings.billing.pro_price_stars,
+    )
+    log.info(
         "sources: %s (skipped: %s)",
         ", ".join(sources) or "none",
         ", ".join(sorted(set(REGISTRY) - set(sources))) or "none",
     )
 
-    bot = Bot(api, db, settings, list(sources))
-    pipeline = Pipeline(db, sources, bot, settings)
+    billing = Billing(db, settings)
+    bot = Bot(api, db, settings, list(sources), billing)
+    pipeline = Pipeline(db, sources, bot, settings, billing=billing)
     llm: LLMClient | None = None
     if settings.ai.enabled:
         llm = LLMClient(settings.ai.base_url, settings.ai.api_key, settings.ai.model)
@@ -90,6 +114,7 @@ async def run(settings: Settings) -> None:
         tasks = [
             asyncio.create_task(bot.run(stop), name="telegram"),
             asyncio.create_task(pipeline.run_forever(stop), name="pipeline"),
+            asyncio.create_task(plan_notices(bot, stop), name="billing"),
         ]
         await stop.wait()
         for task in tasks:

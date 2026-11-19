@@ -77,6 +77,20 @@ class AISettings:
 
 
 @dataclass(frozen=True, slots=True)
+class BillingSettings:
+    #: invite — только по приглашениям; open — любой по /start получает пробный период
+    access_mode: str = "invite"
+    trial_days: int = 7
+    #: цена Pro за 30 дней в Telegram Stars; 0 — оплата выключена
+    pro_price_stars: int = 250
+    support_contact: str = ""
+
+    @property
+    def payments_enabled(self) -> bool:
+        return self.pro_price_stars > 0
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     telegram_token: str = ""
     admin_ids: frozenset[int] = frozenset()
@@ -90,6 +104,7 @@ class Settings:
     user_agent: str = USER_AGENT
     log_level: str = "INFO"
     ai: AISettings = field(default_factory=AISettings)
+    billing: BillingSettings = field(default_factory=BillingSettings)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -108,6 +123,12 @@ class Settings:
             hh_app_token=env.get("HH_APP_TOKEN", "").strip(),
             superjob_api_key=env.get("SUPERJOB_API_KEY", "").strip(),
             log_level=(env.get("LOG_LEVEL", "").strip() or "INFO").upper(),
+            billing=BillingSettings(
+                access_mode=(env.get("ACCESS_MODE", "").strip() or "invite").lower(),
+                trial_days=_int(env, "TRIAL_DAYS", 7),
+                pro_price_stars=_int(env, "PRO_PRICE_STARS", 250),
+                support_contact=env.get("SUPPORT_CONTACT", "").strip(),
+            ),
             ai=AISettings(
                 base_url=env.get("AI_BASE_URL", "").strip().rstrip("/"),
                 api_key=env.get("AI_API_KEY", "").strip(),
@@ -117,6 +138,8 @@ class Settings:
                 max_per_cycle=_int(env, "AI_MAX_PER_CYCLE", 10),
             ),
         )
+        if settings.billing.access_mode not in ("invite", "open"):
+            raise ConfigError("ACCESS_MODE — invite или open")
         if settings.poll_interval_min < 5:
             raise ConfigError("POLL_INTERVAL_MIN не может быть меньше 5 — площадки забанят")
         return settings

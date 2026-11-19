@@ -78,6 +78,17 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     PRIMARY KEY (user_id, day)
 );
 
+-- оплаты Telegram Stars (первые и автопродления)
+CREATE TABLE IF NOT EXISTS payments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    charge_id   TEXT NOT NULL UNIQUE,
+    amount      INTEGER NOT NULL,
+    currency    TEXT NOT NULL,
+    recurring   INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS invites (
     code        TEXT PRIMARY KEY,
     created_by  INTEGER NOT NULL,
@@ -98,6 +109,12 @@ class User:
     allowed: bool
     paused: bool
     filters: UserFilters
+    plan_until: datetime | None = None  # пока в будущем — Pro
+    trial_used: bool = False
+    sub_charge_id: str | None = None  # активная Stars-подписка (для отмены автопродления)
+    last_check: datetime | None = None
+    onboarded: bool = False
+    notified: str = ""  # последнее отправленное уведомление о подписке
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> User:
@@ -107,7 +124,28 @@ class User:
             allowed=bool(row["allowed"]),
             paused=bool(row["paused"]),
             filters=UserFilters.from_json(row["filters"]),
+            plan_until=_dt(row["plan_until"]),
+            trial_used=bool(row["trial_used"]),
+            sub_charge_id=row["sub_charge_id"],
+            last_check=_dt(row["last_check"]),
+            onboarded=bool(row["onboarded"]),
+            notified=row["notified"] or "",
         )
+
+
+def _dt(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+# колонки, добавленные после первой версии схемы: (имя, определение)
+_USER_COLUMNS = [
+    ("plan_until", "TEXT"),
+    ("trial_used", "INTEGER NOT NULL DEFAULT 0"),
+    ("sub_charge_id", "TEXT"),
+    ("last_check", "TEXT"),
+    ("onboarded", "INTEGER NOT NULL DEFAULT 0"),
+    ("notified", "TEXT NOT NULL DEFAULT ''"),
+]
 
 
 @dataclass(slots=True)
@@ -145,7 +183,17 @@ class Database:
         # маленький кэш страниц — экономим RAM
         self.conn.execute("PRAGMA cache_size=-2000")
         self.conn.executescript(SCHEMA)
+        self._migrate_columns()
         self._migrate_legacy_resumes()
+
+    def _migrate_columns(self) -> None:
+        existing = {r["name"] for r in self.conn.execute("PRAGMA table_info(users)")}
+        for name, definition in _USER_COLUMNS:
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
+        # существующие пользователи уже настроены — онбординг им не показываем
+        if "onboarded" not in existing:
+            self.conn.execute("UPDATE users SET onboarded = 1")
 
     def _migrate_legacy_resumes(self) -> None:
         """Резюме из старой колонки users.resume переносятся в таблицу resumes."""
@@ -394,3 +442,88 @@ class Database:
             "DELETE FROM resumes WHERE user_id = ? AND id = ?", (user_id, resume_id)
         )
         return cur.rowcount > 0
+
+    # --- подписка -------------------------------------------------------------
+
+    def set_plan(self, user_id: int, until: datetime, *, trial_used: bool | None = None) -> None:
+        self.conn.execute(
+            "UPDATE users SET plan_until = ?, notified = '',"
+            " trial_used = COALESCE(?, trial_used) WHERE id = ?",
+            (until.isoformat(), None if trial_used is None else int(trial_used), user_id),
+        )
+
+    def set_subscription(self, user_id: int, charge_id: str | None) -> None:
+        self.conn.execute("UPDATE users SET sub_charge_id = ? WHERE id = ?", (charge_id, user_id))
+
+    def set_notified(self, user_id: int, key: str) -> None:
+        self.conn.execute("UPDATE users SET notified = ? WHERE id = ?", (key, user_id))
+
+    def set_last_check(self, user_id: int, when: datetime | None = None) -> None:
+        self.conn.execute(
+            "UPDATE users SET last_check = ? WHERE id = ?",
+            ((when or utcnow()).isoformat(), user_id),
+        )
+
+    def set_onboarded(self, user_id: int) -> None:
+        self.conn.execute("UPDATE users SET onboarded = 1 WHERE id = ?", (user_id,))
+
+    def record_payment(
+        self, user_id: int, *, charge_id: str, amount: int, currency: str, recurring: bool
+    ) -> bool:
+        """Сохраняет платёж; False, если такой charge_id уже был (повтор апдейта)."""
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO payments(user_id, charge_id, amount, currency, recurring,"
+            " created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, charge_id, amount, currency, int(recurring), utcnow().isoformat()),
+        )
+        return cur.rowcount > 0
+
+    def last_payment(self, user_id: int) -> str | None:
+        row = self.conn.execute(
+            "SELECT charge_id FROM payments WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def has_payments(self, user_id: int) -> bool:
+        row = self.conn.execute("SELECT 1 FROM payments WHERE user_id = ? LIMIT 1", (user_id,))
+        return row.fetchone() is not None
+
+    def sent_today(self, user_id: int) -> int:
+        day = utcnow().date().isoformat()
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM deliveries WHERE user_id = ? AND status IN ('sent', 'disliked')"
+            " AND created_at >= ?",
+            (user_id, day),
+        ).fetchone()
+        return row[0]
+
+    def business_stats(self) -> dict[str, int]:
+        now = utcnow()
+        month = now.replace(day=1).date().isoformat()
+        week = (now - timedelta(days=7)).isoformat()
+        q = self.conn.execute
+        return {
+            "users": q("SELECT COUNT(*) FROM users WHERE allowed = 1").fetchone()[0],
+            "active_week": q(
+                "SELECT COUNT(DISTINCT user_id) FROM deliveries WHERE created_at >= ?", (week,)
+            ).fetchone()[0],
+            "pro": q(
+                "SELECT COUNT(*) FROM users WHERE plan_until > ?", (now.isoformat(),)
+            ).fetchone()[0],
+            "paying": q(
+                "SELECT COUNT(*) FROM users WHERE plan_until > ? AND id IN"
+                " (SELECT user_id FROM payments)",
+                (now.isoformat(),),
+            ).fetchone()[0],
+            "subscriptions": q(
+                "SELECT COUNT(*) FROM users WHERE sub_charge_id IS NOT NULL"
+            ).fetchone()[0],
+            "stars_month": q(
+                "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE currency = 'XTR'"
+                " AND created_at >= ?",
+                (month,),
+            ).fetchone()[0],
+            "stars_total": q(
+                "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE currency = 'XTR'"
+            ).fetchone()[0],
+        }
