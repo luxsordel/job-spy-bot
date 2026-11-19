@@ -67,7 +67,20 @@ class Billing:
         return FREE
 
     def is_trial(self, user: User) -> bool:
-        return self.plan(user) is PRO and user.trial_used and not self.db.has_payments(user.id)
+        """Pro только из пробного периода: не оплачен и не продлён админом.
+
+        Выданный админом Pro раньше тоже считался «пробным» (пробный брали, платежей нет) —
+        и в админке, и в боте выглядело так, будто выдача не сработала.
+        """
+        if self.plan(user) is not PRO or not user.trial_used or user.plan_until is None:
+            return False
+        if self.db.has_payments(user.id):
+            return False
+        trial_end = user.trial_until
+        if trial_end is None and user.created_at is not None:
+            # пробный выдан до появления trial_until: он начинался не раньше регистрации
+            trial_end = user.created_at + timedelta(days=self.cfg.trial_days)
+        return trial_end is None or user.plan_until <= trial_end + timedelta(days=1)
 
     def ai_token_limit(self, user: User) -> int:
         plan = self.plan(user)
@@ -122,7 +135,8 @@ class Billing:
             return False
         until = utcnow() + timedelta(days=self.cfg.trial_days)
         self.db.set_plan(user.id, until, trial_used=True)
-        user.plan_until, user.trial_used = until, True
+        self.db.set_trial_until(user.id, until)
+        user.plan_until, user.trial_used, user.trial_until = until, True, until
         return True
 
     def extend(self, user: User, days: int) -> datetime:
