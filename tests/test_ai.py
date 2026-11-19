@@ -349,3 +349,44 @@ def test_vacancy_prompt_has_address_and_format():
     v = vac("1", "Dev", address="Минск, ул. Притыцкого (м. Пушкинская)", work_formats=("hybrid",))
     text = vacancy_prompt(v, "")
     assert "Адрес: Минск, ул. Притыцкого (м. Пушкинская)" in text and "Формат: hybrid" in text
+
+
+async def test_global_budget_reserves_rest_for_pro(db):
+    fake = FakeLLM()
+    ai = make_ai(db, fake, daily_tokens_total=1000, pro_reserve_pct=20)
+    alerts = []
+    ai.on_alert = lambda key, text: alerts.append((key, text))
+    free = db.ensure_user(1, allowed=True)
+    pro = db.ensure_user(2, allowed=True)
+    ai.is_priority = lambda user: user.id == 2
+    assert ai.has_budget(free) and ai.has_budget(pro)
+    db.add_tokens(3, 850)  # другие пользователи потратили 85 %
+    assert not ai.has_budget(free) and ai.has_budget(pro)
+    assert "только для Pro" in alerts[-1][1]
+    db.add_tokens(3, 200)
+    assert not ai.has_budget(pro)
+    assert "исчерпан" in alerts[-1][1]
+    rid = db.add_resume(1, "CV", "Python developer " * 10)
+    reply = await ai.build_profile(free, db.get_resume(1, rid))
+    assert "лимит ИИ исчерпан" in reply and fake.requests == []
+
+
+async def test_fallback_model(db):
+    fake = FakeLLM()
+    seen = []
+
+    def flaky(request):
+        model = json.loads(request.content)["model"]
+        seen.append(model)
+        if model == "model":
+            return httpx.Response(401, json={"error": "model unavailable"})
+        return fake(request)
+
+    llm = LLMClient("https://llm.test/v1", "key", "model", transport=httpx.MockTransport(flaky))
+    ai = AIService(
+        db, llm, AISettings(base_url="x", api_key="k", model="m", fallback_model="spare")
+    )
+    user = db.ensure_user(1, allowed=True)
+    rid = db.add_resume(1, "CV", "Python developer " * 10)
+    reply = await ai.build_profile(user, db.get_resume(1, rid))
+    assert "разобрано" in reply and seen == ["model", "spare"]
