@@ -80,11 +80,17 @@ EDITABLE_KEYS = (
     "AI_DAILY_TOKENS_PER_USER",
     "AI_MAX_DESCRIPTION_CHARS",
     "AI_MAX_PER_CYCLE",
+    "AI_DAILY_TOKENS_TOTAL",
+    "AI_PRO_RESERVE_PCT",
+    "AI_FALLBACK_MODEL",
     "RATE_LIMIT_PER_MIN",
     "MAX_UPLOADS_PER_DAY",
     "DELETE_INACTIVE_DAYS",
     "ALERT_COOLDOWN_MIN",
     "SOURCE_SILENCE_HOURS",
+    "BACKUP_HOUR_UTC",
+    "BACKUP_KEEP",
+    "BACKUP_TO_TELEGRAM",
 )
 #: значения не показываются, только «задано / не задано»
 SECRET_KEYS = frozenset({"SUPERJOB_API_KEY", "AI_API_KEY"})
@@ -134,6 +140,12 @@ class AISettings:
     daily_tokens_per_user: int = 40_000
     max_description_chars: int = 2_500
     max_per_cycle: int = 10
+    #: общий дневной бюджет токенов на весь бот (0 — без общего лимита)
+    daily_tokens_total: int = 0
+    #: последние N % общего бюджета — только для Pro
+    pro_reserve_pct: int = 20
+    #: запасная модель, если основная не отвечает (пусто — нет)
+    fallback_model: str = ""
 
     @property
     def enabled(self) -> bool:
@@ -171,6 +183,20 @@ class GuardSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class BackupSettings:
+    """Ежедневные бэкапы базы (#20)."""
+
+    #: папка для копий; пусто — `backups` рядом с базой
+    directory: Path | None = None
+    #: сколько последних копий хранить (0 — бэкапы выключены)
+    keep: int = 7
+    #: в котором часу по UTC делать копию
+    hour_utc: int = 3
+    #: отправлять свежую копию админам в Telegram (копия вне сервера)
+    to_telegram: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class AdminWebSettings:
     """Веб-админка. Включается, если задан токен и порт."""
 
@@ -199,6 +225,11 @@ class Settings:
     billing: BillingSettings = field(default_factory=BillingSettings)
     guard: GuardSettings = field(default_factory=GuardSettings)
     admin_web: AdminWebSettings = field(default_factory=AdminWebSettings)
+    backup: BackupSettings = field(default_factory=BackupSettings)
+
+    @property
+    def backup_dir(self) -> Path:
+        return self.backup.directory or self.db_path.parent / "backups"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -229,6 +260,9 @@ class Settings:
                 daily_tokens_per_user=_int(env, "AI_DAILY_TOKENS_PER_USER", 40_000),
                 max_description_chars=_int(env, "AI_MAX_DESCRIPTION_CHARS", 2_500),
                 max_per_cycle=_int(env, "AI_MAX_PER_CYCLE", 10),
+                daily_tokens_total=_int(env, "AI_DAILY_TOKENS_TOTAL", 0),
+                pro_reserve_pct=_int(env, "AI_PRO_RESERVE_PCT", 20),
+                fallback_model=env.get("AI_FALLBACK_MODEL", "").strip(),
             ),
             guard=GuardSettings(
                 rate_limit_per_min=_int(env, "RATE_LIMIT_PER_MIN", 30),
@@ -236,6 +270,12 @@ class Settings:
                 inactive_days=_int(env, "DELETE_INACTIVE_DAYS", 180),
                 alert_cooldown_min=_int(env, "ALERT_COOLDOWN_MIN", 30),
                 source_silence_hours=_int(env, "SOURCE_SILENCE_HOURS", 12),
+            ),
+            backup=BackupSettings(
+                directory=Path(d) if (d := env.get("BACKUP_DIR", "").strip()) else None,
+                keep=_int(env, "BACKUP_KEEP", 7),
+                hour_utc=_int(env, "BACKUP_HOUR_UTC", 3),
+                to_telegram=_int(env, "BACKUP_TO_TELEGRAM", 1) != 0,
             ),
             admin_web=AdminWebSettings(
                 host=env.get("ADMIN_WEB_HOST", "").strip() or "127.0.0.1",
@@ -252,6 +292,14 @@ class Settings:
             raise ConfigError("RATE_LIMIT_PER_MIN не может быть меньше 5")
         if settings.billing.access_mode not in ("invite", "open"):
             raise ConfigError("ACCESS_MODE — invite или open")
+        if not 0 <= settings.ai.pro_reserve_pct <= 100:
+            raise ConfigError("AI_PRO_RESERVE_PCT — от 0 до 100")
+        if settings.ai.daily_tokens_total < 0:
+            raise ConfigError("AI_DAILY_TOKENS_TOTAL не может быть отрицательным")
+        if not 0 <= settings.backup.hour_utc <= 23:
+            raise ConfigError("BACKUP_HOUR_UTC — час от 0 до 23")
+        if not 0 <= settings.backup.keep <= 365:
+            raise ConfigError("BACKUP_KEEP — от 0 (выключено) до 365 копий")
         if settings.poll_interval_min < 5:
             raise ConfigError("POLL_INTERVAL_MIN не может быть меньше 5 — площадки забанят")
         return settings

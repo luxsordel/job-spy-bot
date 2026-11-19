@@ -185,6 +185,23 @@ def test_overrides_file(tmp_path):
         save_overrides(path, {"SUPPORT_CONTACT": "a\nTELEGRAM_BOT_TOKEN=evil"})
 
 
+async def test_api_backup(web, tmp_path):
+    from jobspybot.backup import Backups
+
+    status, _ = await api(web, "POST", "/api/backup")
+    assert status == 409  # бэкапы не подключены
+    web.backups = Backups(web.db, tmp_path / "backups")
+    status, data = await api(web, "POST", "/api/backup")
+    assert status == 200 and data["file"].endswith(".sqlite3.gz")
+    _, listing = await api(web, "GET", "/api/backups")
+    assert [c["file"] for c in listing["copies"]] == [data["file"]]
+    _, st = await api(web, "GET", "/api/status")
+    assert st["backups"]["enabled"]
+    tg = web.bot.api._client._transport.handler
+    (upload,) = [p for m, p in tg.calls if m == "sendDocument"]
+    assert data["file"] in upload["multipart"] and str(ADMIN) in upload["multipart"]
+
+
 async def test_admin_api_reset(web, db):
     onboarded_user(db, GUEST, queries=["qa"])
     db.add_resume(GUEST, "CV", "Аналитик: BPMN, SQL, EPC. " * 5)

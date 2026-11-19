@@ -56,9 +56,10 @@ class LLMClient:
         max_tokens: int,
         json_mode: bool = False,
         temperature: float = 0.2,
+        model: str | None = None,
     ) -> LLMReply:
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,
             # системная часть идёт первой и не меняется между вакансиями одного
             # пользователя — провайдеры с префиксным кэшем считают её дешевле
             "messages": [
