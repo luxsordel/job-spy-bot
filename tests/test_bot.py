@@ -19,12 +19,21 @@ class FakeTelegram:
 
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
+        self.files: dict[str, bytes] = {}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
+        if "/file/" in request.url.path:
+            return httpx.Response(200, content=self.files[request.url.path.rsplit("/", 1)[-1]])
         method = request.url.path.rsplit("/", 1)[-1]
         payload = json.loads(request.content or b"{}")
         self.calls.append((method, payload))
-        result = {"username": "spybot"} if method == "getMe" else {"message_id": 1}
+        if method == "getFile":
+            fid = payload["file_id"]
+            result = {"file_path": f"docs/{fid}", "file_size": len(self.files[fid])}
+        elif method == "getMe":
+            result = {"username": "spybot"}
+        else:
+            result = {"message_id": 1}
         return httpx.Response(200, json={"ok": True, "result": result})
 
     def texts(self, chat_id: int | None = None) -> list[str]:
@@ -55,6 +64,12 @@ def message(user_id: int, text: str) -> dict:
             "text": text,
         },
     }
+
+
+def document(user_id: int, file_id: str, file_name: str) -> dict:
+    update = message(user_id, "")
+    update["message"]["document"] = {"file_id": file_id, "file_name": file_name, "file_size": 10}
+    return update
 
 
 def callback(user_id: int, data: str) -> dict:
@@ -142,19 +157,48 @@ async def test_sources_toggle(bot, tg, db):
     assert db.get_user(ADMIN).filters.sources == ["justjoin"]  # последнюю не выключить
 
 
-async def test_resume_flow_with_hook(bot, tg, db):
+async def test_text_resume_flow_with_hook(bot, tg, db):
     received = []
 
-    async def hook(user, text):
-        received.append(text)
+    async def hook(user, resume):
+        received.append(resume)
         return "профиль готов"
 
     bot.on_resume = hook
     await bot.handle_update(message(ADMIN, "/resume"))
     resume = "Python-разработчик, 2 года опыта, Django, PostgreSQL, Docker. " * 2
     await bot.handle_update(message(ADMIN, resume))
-    assert db.get_user(ADMIN).resume == resume.strip()
-    assert received and tg.texts(ADMIN)[-1] == "профиль готов"
+    (stored,) = db.get_resumes(ADMIN)
+    assert stored.text == resume.strip() and stored.title == "Резюме 1"
+    assert received[0].id == stored.id and tg.texts(ADMIN)[-1] == "профиль готов"
+
+
+async def test_documents_become_resumes_and_can_be_deleted(bot, tg, db):
+    tg.files["f1"] = ("QA engineer: Selenium, Postman, SQL, тест-кейсы, баг-репорты. " * 2).encode()
+    tg.files["f2"] = b"just a picture"
+    await bot.handle_update(document(ADMIN, "f1", "QA_resume.txt"))
+    await bot.handle_update(document(ADMIN, "f2", "photo.jpg"))
+    (r,) = db.get_resumes(ADMIN)
+    assert (r.title, r.file_id, r.file_name) == ("QA resume", "f1", "QA_resume.txt")
+    assert "Не удалось прочитать «photo.jpg»" in tg.texts(ADMIN)[-1]
+
+    await bot.handle_update(message(ADMIN, "/resumes"))
+    assert "QA resume" in tg.texts(ADMIN)[-1]
+    await bot.handle_update(callback(ADMIN, f"rdel:{r.id}"))
+    assert db.get_resumes(ADMIN) == []
+    # чужое резюме удалить нельзя
+    other = db.add_resume(GUEST, "x", "y" * 60) if db.ensure_user(GUEST) else None
+    await bot.handle_update(callback(ADMIN, f"rdel:{other}"))
+    assert len(db.get_resumes(GUEST)) == 1
+
+
+async def test_resume_limit(bot, tg, db):
+    db.ensure_user(ADMIN, allowed=True)
+    for i in range(10):
+        db.add_resume(ADMIN, f"r{i}", "x" * 60)
+    await bot.handle_update(message(ADMIN, "/resume " + "текст резюме " * 10))
+    assert len(db.get_resumes(ADMIN)) == 10
+    assert "Уже 10 резюме" in tg.texts(ADMIN)[-1]
 
 
 async def test_send_vacancy_and_dislike(bot, tg, db):

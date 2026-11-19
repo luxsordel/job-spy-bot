@@ -10,9 +10,15 @@ from html import escape
 from typing import Any
 
 from jobspybot.config import Settings
-from jobspybot.db import Database, User
+from jobspybot.db import Database, Resume, User
 from jobspybot.filters import COUNTRIES, UserFilters
 from jobspybot.models import Level, Vacancy
+from jobspybot.resume_files import (
+    MAX_FILE_BYTES,
+    ResumeFileError,
+    extract_text,
+    title_from_filename,
+)
 from jobspybot.sources import REGISTRY, SOURCE_ORDER
 from jobspybot.telegram.api import TelegramAPI, TelegramError, button, inline_keyboard
 from jobspybot.telegram.render import HELP, settings_text, vacancy_card
@@ -30,7 +36,8 @@ COMMANDS = [
     ("salary", "Минимальная зарплата, $"),
     ("sources", "Площадки"),
     ("skills", "Навыки для отбора"),
-    ("resume", "Загрузить резюме"),
+    ("resume", "Загрузить резюме (PDF / текст)"),
+    ("resumes", "Мои резюме"),
     ("threshold", "Порог оценки ИИ"),
     ("stats", "Статистика"),
     ("pause", "Приостановить"),
@@ -40,8 +47,9 @@ COMMANDS = [
 
 _SPLIT = re.compile(r"[;,\n]+")
 MAX_RESUME_CHARS = 8000
+MAX_RESUMES = 10
 
-ResumeHook = Callable[[User, str], Awaitable[str]]
+ResumeHook = Callable[[User, Resume], Awaitable[str]]
 CallbackHook = Callable[[User, dict[str, Any], str], Awaitable[None]]
 
 
@@ -146,8 +154,12 @@ class Bot:
             await self._handle_guest(user, cmd, args)
             return
 
+        if msg.get("document"):
+            await self._receive_document(user, msg["document"])
+            return
+
         if user.id in self._awaiting_resume and not cmd:
-            await self._receive_resume(user, msg)
+            await self._save_resume(user, text, title=f"Резюме {self._resume_count(user) + 1}")
             return
 
         handler = getattr(self, f"cmd_{cmd}", None) if cmd else None
@@ -194,7 +206,7 @@ class Bot:
                 user.filters,
                 self.available_sources,
                 paused=user.paused,
-                has_resume=bool(user.resume),
+                resumes=self._resume_count(user),
             ),
         )
 
@@ -301,48 +313,77 @@ class Bot:
 
     async def cmd_resume(self, user: User, args: str) -> None:
         if args:
-            await self._save_resume(user, args)
+            await self._save_resume(user, args, title=f"Резюме {self._resume_count(user) + 1}")
             return
         self._awaiting_resume.add(user.id)
         await self.reply(
             user,
-            "📄 Пришлите резюме следующим сообщением — текстом или файлом .txt / .md.\n"
-            "Оно будет сжато в короткий профиль, по которому ИИ оценивает вакансии.",
+            "📄 Пришлите резюме: файлом PDF / .txt / .md или текстом следующим сообщением.\n\n"
+            f"Можно загрузить до {MAX_RESUMES} резюме под разные направления (Python, C++, QA…) — "
+            "файлы можно присылать в любой момент, без команды. Под каждую вакансию ИИ "
+            "выберет резюме с наибольшим шансом на оффер.",
         )
 
-    async def _receive_resume(self, user: User, msg: dict[str, Any]) -> None:
-        self._awaiting_resume.discard(user.id)
-        doc = msg.get("document")
-        if doc:
-            name = (doc.get("file_name") or "").lower()
-            if not name.endswith((".txt", ".md")):
-                await self.reply(
-                    user,
-                    "Нужен .txt или .md. PDF/DOCX пока не поддерживаются — "
-                    "скопируйте текст резюме сообщением.",
-                )
-                return
-            try:
-                text = (await self.api.download_file(doc["file_id"])).decode("utf-8", "replace")
-            except (ValueError, TelegramError) as exc:
-                await self.reply(user, f"Не удалось прочитать файл: {escape(str(exc))}")
-                return
-        else:
-            text = msg.get("text") or ""
-        await self._save_resume(user, text)
+    def _resume_count(self, user: User) -> int:
+        return len(self.db.get_resumes(user.id))
 
-    async def _save_resume(self, user: User, text: str) -> None:
+    async def _receive_document(self, user: User, doc: dict[str, Any]) -> None:
+        self._awaiting_resume.discard(user.id)
+        name = doc.get("file_name") or "resume"
+        if (doc.get("file_size") or 0) > MAX_FILE_BYTES:
+            await self.reply(user, "Файл слишком большой (максимум 3 МБ).")
+            return
+        try:
+            data = await self.api.download_file(doc["file_id"], max_bytes=MAX_FILE_BYTES)
+            text = extract_text(data, name)
+        except (ResumeFileError, ValueError, TelegramError) as exc:
+            await self.reply(user, f"Не удалось прочитать «{escape(name)}»: {escape(str(exc))}")
+            return
+        await self._save_resume(
+            user, text, title=title_from_filename(name), file_id=doc["file_id"], file_name=name
+        )
+
+    async def _save_resume(
+        self,
+        user: User,
+        text: str,
+        *,
+        title: str,
+        file_id: str | None = None,
+        file_name: str | None = None,
+    ) -> None:
+        self._awaiting_resume.discard(user.id)
         text = text.strip()[:MAX_RESUME_CHARS]
         if len(text) < 50:
             await self.reply(user, "Слишком короткое резюме.")
             return
-        self.db.save_resume(user.id, text)
-        user.resume = text
+        if self._resume_count(user) >= MAX_RESUMES:
+            await self.reply(user, f"Уже {MAX_RESUMES} резюме — удалите лишнее в /resumes.")
+            return
+        resume_id = self.db.add_resume(user.id, title, text, file_id=file_id, file_name=file_name)
+        resume = self.db.get_resume(user.id, resume_id)
+        assert resume is not None
         if self.on_resume:
-            await self.reply(user, "⏳ Анализирую резюме…")
-            await self.reply(user, await self.on_resume(user, text))
+            await self.reply(user, f"⏳ Анализирую «{escape(title)}»…")
+            await self.reply(user, await self.on_resume(user, resume))
         else:
-            await self.reply(user, "✅ Резюме сохранено.")
+            await self.reply(user, f"✅ Резюме «{escape(title)}» сохранено.")
+
+    def _resumes_view(self, user: User) -> tuple[str, dict[str, Any] | None]:
+        resumes = self.db.get_resumes(user.id)
+        if not resumes:
+            return "Резюме пока нет. Пришлите PDF или /resume.", None
+        lines = ["<b>Ваши резюме</b> (ИИ выбирает лучшее под каждую вакансию):", ""]
+        for r in resumes:
+            skills = ", ".join(r.skills[:8]) or "профиль не готов"
+            icon = "📎" if r.file_id else "📝"
+            lines.append(f"{icon} <b>{escape(r.title)}</b> — {escape(skills)}")
+        rows = [[button(f"🗑 {r.title[:30]}", data=f"rdel:{r.id}")] for r in resumes]
+        return "\n".join(lines), inline_keyboard(*rows)
+
+    async def cmd_resumes(self, user: User, args: str) -> None:
+        text, markup = self._resumes_view(user)
+        await self.reply(user, text, markup)
 
     async def cmd_stats(self, user: User, args: str) -> None:
         s = self.db.stats(user.id)
@@ -430,6 +471,21 @@ class Bot:
             if msg:
                 await self.api.edit_reply_markup(
                     msg["chat"]["id"], msg["message_id"], self._sources_markup(f)
+                )
+            return
+
+        if prefix == "rdel" and value.isdigit():
+            deleted = self.db.delete_resume(user.id, int(value))
+            await self.api.answer_callback(cb["id"], "Удалено" if deleted else "Уже удалено")
+            if msg:
+                text, markup = self._resumes_view(user)
+                await self.api.call(
+                    "editMessageText",
+                    chat_id=msg["chat"]["id"],
+                    message_id=msg["message_id"],
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=markup,
                 )
             return
 

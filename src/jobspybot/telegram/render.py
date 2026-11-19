@@ -50,7 +50,7 @@ def _list(items: list[str], empty: str = "—") -> str:
 
 
 def settings_text(
-    f: UserFilters, available_sources: list[str], *, paused: bool, has_resume: bool
+    f: UserFilters, available_sources: list[str], *, paused: bool, resumes: int
 ) -> str:
     sources = f.sources or available_sources
     countries = ", ".join(COUNTRIES.get(c, c) for c in f.countries) or "любые"
@@ -70,7 +70,7 @@ def settings_text(
             f"💰 Зарплата: {salary}",
             f"🔎 Площадки: {_list([REGISTRY[s].title for s in sources if s in REGISTRY])}",
             f"🧩 Навыки: {_list(f.skills, '<i>не заданы — /skills</i>')}",
-            f"📄 Резюме: {'загружено' if has_resume else 'нет — /resume'}",
+            f"📄 Резюме: {resumes or 'нет — пришлите PDF'}" + (" — /resumes" if resumes else ""),
             f"🤖 Порог ИИ: {f.ai_threshold}/100",
         ]
     )
@@ -79,7 +79,7 @@ def settings_text(
 HELP = """<b>job-spy-bot</b> — присылаю свежие вакансии с BY / RU / KZ / GE / PL площадок.
 
 <b>Что искать</b>
-/query <i>python developer; django</i> — поисковые запросы (через «;»)
+/query <i>python developer; c++; тестировщик</i> — что искать, можно сразу несколько направлений
 /include <i>python, backend</i> — хотя бы одно слово в названии
 /exclude <i>senior, 1с, php</i> — стоп-слова
 /level <i>junior middle</i> — уровни (intern junior middle senior lead)
@@ -91,7 +91,9 @@ HELP = """<b>job-spy-bot</b> — присылаю свежие вакансии 
 /skills <i>python, sql, docker</i> — навыки для отбора лучших вакансий
 
 <b>ИИ</b>
-/resume — загрузить резюме (текстом или .txt файлом)
+Пришлите PDF / .txt — это новое резюме (до 10, под разные направления).
+ИИ выберет лучшее под каждую вакансию.
+/resume — резюме текстом, /resumes — список и удаление
 /threshold <i>60</i> — присылать только вакансии с оценкой ИИ не ниже
 
 <b>Прочее</b>
