@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
+from jobspybot.limits import safe_salary
 from jobspybot.models import Level, Vacancy
 
 # Примерные курсы к USD — для фильтра «зарплата от» точность до процентов не важна.
@@ -89,7 +90,12 @@ class UserFilters:
             return cls()
         data = json.loads(raw)
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        f = cls(**{k: v for k, v in data.items() if k in known})
+        # старые записи могли сохранить нереальную зарплату — она ломала арифметику
+        f.min_salary_usd = safe_salary(f.min_salary_usd) or 0
+        if not isinstance(f.ai_threshold, int) or not 0 <= f.ai_threshold <= 100:
+            f.ai_threshold = 60
+        return f
 
 
 @lru_cache(maxsize=2048)

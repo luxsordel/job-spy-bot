@@ -146,3 +146,23 @@ async def test_changing_filters_reevaluates_filtered(db, pipeline_factory):
     db.save_filters(1, UserFilters(queries=["python"]))
     await p.run_cycle()
     assert notifier.sent == [(1, "a:1")]
+
+
+async def test_source_health_and_silence_alert(db, pipeline_factory):
+    from datetime import timedelta
+
+    habr = FakeSource("habr", {"python": [vac("habr", "1", "Python dev")]})
+    praca = FakeSource("praca_by", SourceUnavailable("403"))
+    pipeline = pipeline_factory([habr, praca])
+    alerts: list[tuple[str, str, float | None]] = []
+    pipeline.on_alert = lambda key, text, cooldown: alerts.append((key, text, cooldown))
+    add_user(db, 1, queries=["python"])
+    await pipeline.run_cycle()
+    assert pipeline.status["habr"].last_count == 1 and pipeline.status["habr"].found_at
+    assert pipeline.status["praca_by"].error == "403" and not pipeline.status["praca_by"].found_at
+    assert alerts == []  # только что запустились — рано тревожить
+    later = datetime.now(UTC) + timedelta(hours=13)
+    assert pipeline.check_silence(["habr", "praca_by"], now=later) == ["habr", "praca_by"]
+    keys = [k for k, _, _ in alerts]
+    assert keys == ["source:habr", "source:praca_by"] and "403" in alerts[1][1]
+    assert pipeline.last_cycle is not None and pipeline.last_cycle.fetched == 1

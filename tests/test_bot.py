@@ -179,7 +179,14 @@ async def test_manual_onboarding_questionnaire(db, tg):
     await bot.handle_update(callback(GUEST, "pq:custom"))
     await bot.handle_update(message(GUEST, "аналитик данных, python developer"))
     await bot.handle_update(callback(GUEST, "pq:next:directions"))
-    await bot.handle_update(callback(GUEST, "pq:level:junior"))
+    assert "уровня" in shown(tg)
+    await bot.handle_update(callback(GUEST, "pq:next:level"))
+    assert tg.calls[-1][1]["text"] == "Выберите хотя бы один уровень"
+    # несколько грейдов сразу: стажёр и junior, а потом junior снят и добавлен middle
+    for lvl in ("intern", "junior", "middle", "junior"):
+        await bot.handle_update(callback(GUEST, f"pq:level:{lvl}"))
+    assert db.get_user(GUEST).filters.levels == ["intern", "middle"]
+    await bot.handle_update(callback(GUEST, "pq:next:level"))
     await bot.handle_update(callback(GUEST, "pq:next:work_formats"))
     assert tg.calls[-1][1]["text"] == "Выберите хотя бы один формат"
     await bot.handle_update(callback(GUEST, "pq:fmt:remote"))
@@ -196,7 +203,7 @@ async def test_manual_onboarding_questionnaire(db, tg):
     assert user.onboarded
     # ручной ввод только добавляет: уже выбранный «python developer» не снимается
     assert f.queries == ["python developer", "аналитик данных"]
-    assert f.levels == ["intern", "junior"]
+    assert f.levels == ["intern", "middle"]
     assert f.countries == ["BY", "PL", "REMOTE"] and not f.remote_only
     assert f.min_salary_usd == 1200  # 80% от ожиданий
     assert profile.relocation and profile.relocation_countries == ["PL"]
@@ -226,14 +233,25 @@ async def test_resume_onboarding_asks_only_missing(db, tg):
     await bot.handle_update(message(GUEST, "/start"))
     tg.files["f1"] = ("Python developer: FastAPI, PostgreSQL, Docker, Git. " * 3).encode()
     await bot.handle_update(document(GUEST, "f1", "cv.txt"))
-    texts = tg.texts(GUEST)
-    assert any("Вот что я понял" in t for t in texts)
-    assert "Сколько хотите получать" in texts[-1]  # всё остальное есть в резюме
+    # сначала человек видит, что понял ИИ, и может это поправить
+    assert "Вот что я понял" in shown(tg)
+    assert {"ob:next", "pe:level", "pe:directions"} <= {b.get("callback_data") for b in buttons(tg)}
+    assert db.get_user(GUEST).filters.levels == ["intern", "junior"]
+    # ИИ ошибся с уровнем: убираем стажёра, добавляем middle и возвращаемся к профилю
+    await bot.handle_update(callback(GUEST, "pe:level"))
+    await bot.handle_update(callback(GUEST, "pq:level:intern"))
+    await bot.handle_update(callback(GUEST, "pq:level:middle"))
+    await bot.handle_update(callback(GUEST, "pq:next:level"))
+    assert "Вот что я понял" not in shown(tg) and "Middle" in shown(tg)
+    assert not db.get_user(GUEST).onboarded
+    await bot.handle_update(callback(GUEST, "ob:next"))
+    assert "Сколько хотите получать" in shown(tg)  # всё остальное есть в резюме
     await bot.handle_update(callback(GUEST, "pq:sal:0"))
     user = db.get_user(GUEST)
     assert user.onboarded
     assert user.filters.queries == ["python developer", "backend developer"]
     assert user.filters.countries == ["BY", "REMOTE"] and user.filters.min_salary_usd == 0
+    assert user.filters.levels == ["junior", "middle"]
 
 
 async def test_profile_edit_updates_search(bot, tg, db):
@@ -243,8 +261,11 @@ async def test_profile_edit_updates_search(bot, tg, db):
     assert any(b.get("callback_data") == "pe:fill_missing" for b in buttons(tg))
     await bot.handle_update(callback(ADMIN, "pe:level"))
     await bot.handle_update(callback(ADMIN, "pq:level:middle"))
-    assert db.get_user(ADMIN).filters.levels == ["junior", "middle"]
+    await bot.handle_update(callback(ADMIN, "pq:level:senior"))
+    assert db.get_user(ADMIN).filters.levels == ["middle", "senior"]
+    await bot.handle_update(callback(ADMIN, "pq:next:level"))
     assert "Профиль" in shown(tg)  # вернулись к карточке
+    assert "Middle" in shown(tg) and "Senior" in shown(tg)
     await bot.handle_update(callback(ADMIN, "pe:skills"))
     await bot.handle_update(message(ADMIN, "python, sql"))
     assert db.get_profile(ADMIN).skills == ["python", "sql"]
@@ -551,3 +572,144 @@ async def test_vacancy_card_shows_format_and_address(bot, tg, db):
     await bot.send_vacancy(db.get_user(ADMIN), v, db.delivery_id(ADMIN, v.uid))
     text = tg.calls[-1][1]["text"]
     assert "🔀 гибрид" in text and "м. Пушкинская" in text
+
+
+# --- фидбек тестировщиков: ввод, грейды, защита, данные ----------------------------
+
+
+async def test_unrealistic_salary_does_not_break_bot(bot, tg, db):
+    """Регрессия: огромная зарплата ломала бота (OverflowError в профиле)."""
+    onboarded_user(db, ADMIN)
+    await bot.handle_update(callback(ADMIN, "pe:salary"))
+    await bot.handle_update(callback(ADMIN, "pq:salc"))
+    await bot.handle_update(message(ADMIN, "9" * 500))
+    assert "Слишком большая сумма" in tg.texts(ADMIN)[-1]
+    assert db.get_profile(ADMIN).salary_usd is None
+    # бот продолжает ждать сумму и принимает нормальную
+    await bot.handle_update(message(ADMIN, "1 800 $"))
+    assert db.get_profile(ADMIN).salary_usd == 1800
+    assert db.get_user(ADMIN).filters.min_salary_usd == 1440
+    await bot.handle_update(callback(ADMIN, "f:salary"))
+    await bot.handle_update(message(ADMIN, "100000000000000000000"))
+    assert "Слишком большая сумма" in tg.texts(ADMIN)[-1]
+    await bot.handle_update(message(ADMIN, "/salary 10" + "0" * 30))
+    assert "Слишком большая сумма" in tg.texts(ADMIN)[-1]
+    await bot.handle_update(message(ADMIN, "/threshold ²"))
+    assert "от 0 до 100" in tg.texts(ADMIN)[-1]
+    await bot.handle_update(message(ADMIN, r.BTN_PROFILE))
+    assert "Профиль" in tg.texts(ADMIN)[-1]
+
+
+async def test_long_lists_are_trimmed(bot, tg, db):
+    onboarded_user(db, ADMIN)
+    await bot.handle_update(callback(ADMIN, "f:exclude"))
+    await bot.handle_update(message(ADMIN, ", ".join(f"слово{i}" * 20 for i in range(100))))
+    f = db.get_user(ADMIN).filters
+    assert len(f.exclude) == 30 and all(len(w) <= 60 for w in f.exclude)
+
+
+async def test_level_removed_in_filters_stays_removed(bot, tg, db):
+    """Регрессия: снятый в фильтрах грейд возвращался после любой правки профиля."""
+    onboarded_user(db, ADMIN, levels=["intern", "junior"])
+    profile = db.get_profile(ADMIN)
+    profile.level = "junior"
+    db.save_profile(ADMIN, profile)
+    await bot.handle_update(callback(ADMIN, "f:lvl:intern"))
+    await bot.handle_update(callback(ADMIN, "f:lvl:middle"))
+    assert db.get_user(ADMIN).filters.levels == ["junior", "middle"]
+    await bot.handle_update(callback(ADMIN, "pf:strict"))  # любая правка профиля
+    assert db.get_user(ADMIN).filters.levels == ["junior", "middle"]
+    await bot.handle_update(message(ADMIN, r.BTN_PROFILE))
+    assert "Junior" in tg.texts(ADMIN)[-1] and "Middle" in tg.texts(ADMIN)[-1]
+
+
+async def test_new_resume_shows_editable_profile(bot, tg, db):
+    onboarded_user(db, ADMIN)
+
+    async def fake_ai(user, resume):
+        profile = db.get_profile(user.id)
+        profile.merge_extracted({"level": "senior", "skills": ["go"]})
+        db.save_profile(user.id, profile)
+        return "✅ Резюме разобрано"
+
+    bot.on_resume = fake_ai
+    await bot.handle_update(message(ADMIN, "/resume " + "Go developer, Kubernetes. " * 5))
+    assert "Профиль дополнен из резюме" in shown(tg)
+    assert {"pe:level", "pe:fill"} <= {b.get("callback_data") for b in buttons(tg)}
+
+
+async def test_rate_limit(db, tg):
+    bot = make_bot(db, tg)
+    onboarded_user(db, GUEST)
+    for _ in range(30):
+        await bot.handle_update(message(GUEST, r.BTN_HELP))
+    before = len(tg.texts(GUEST))
+    await bot.handle_update(message(GUEST, r.BTN_HELP))
+    await bot.handle_update(message(GUEST, r.BTN_HELP))
+    texts = tg.texts(GUEST)
+    assert len(texts) == before + 1 and "Слишком много" in texts[-1]
+    await bot.handle_update(callback(GUEST, "st:show"))
+    assert tg.calls[-1][1]["text"] == "Слишком часто — подождите минуту"
+    # админа лимит не касается
+    onboarded_user(db, ADMIN)
+    for _ in range(40):
+        await bot.handle_update(message(ADMIN, r.BTN_HELP))
+    assert "Как это работает" in tg.texts(ADMIN)[-1]
+
+
+async def test_daily_upload_limit(db, tg):
+    bot = make_bot(db, tg)
+    onboarded_user(db, GUEST)
+    tg.files["f"] = b"x"
+    for _ in range(10):
+        await bot.handle_update(document(GUEST, "f", "photo.jpg"))
+    await bot.handle_update(document(GUEST, "f", "photo.jpg"))
+    assert "лимит — 10 файлов" in tg.texts(GUEST)[-1]
+
+
+async def test_ban_and_unban(bot, tg, db):
+    onboarded_user(db, GUEST)
+    await bot.handle_update(message(GUEST, "/ban 100"))
+    assert "Только для администратора" in tg.texts(GUEST)[-1]
+    await bot.handle_update(message(ADMIN, f"/ban {GUEST}"))
+    assert db.get_user(GUEST).banned and "Забанен" in tg.texts(ADMIN)[-1]
+    assert GUEST not in [u.id for u in db.active_users()]
+    before = len(tg.calls)
+    await bot.handle_update(message(GUEST, r.BTN_SEARCH))
+    assert len(tg.calls) == before  # забаненному не отвечаем
+    await bot.handle_update(message(ADMIN, f"/ban {ADMIN}"))
+    assert "нельзя" in tg.texts(ADMIN)[-1]
+    await bot.handle_update(message(ADMIN, f"/unban {GUEST}"))
+    await bot.handle_update(message(GUEST, r.BTN_SEARCH))
+    assert "Мой поиск" in tg.texts(GUEST)[-1]
+
+
+async def test_privacy_and_delete_my_data(bot, tg, db):
+    onboarded_user(db, GUEST, queries=["python developer"])
+    db.add_resume(GUEST, "cv", "Python developer " * 10)
+    profile = db.get_profile(GUEST)
+    profile.city = "Минск"
+    db.save_profile(GUEST, profile)
+    db.set_plan(GUEST, datetime.now(UTC) + timedelta(days=3), trial_used=True)
+    await bot.handle_update(message(GUEST, "/privacy"))
+    assert "ИИ-провайдеру" in tg.texts(GUEST)[-1] and "180 дней" in tg.texts(GUEST)[-1]
+    await bot.handle_update(callback(GUEST, "del:ask"))
+    assert "Удалить мои данные?" in shown(tg)
+    await bot.handle_update(callback(GUEST, "del:no"))
+    assert db.get_resumes(GUEST)
+    await bot.handle_update(message(GUEST, "/delete_me"))
+    await bot.handle_update(callback(GUEST, "del:yes"))
+    user = db.get_user(GUEST)
+    assert db.get_resumes(GUEST) == [] and db.get_profile(GUEST).city == ""
+    assert user.filters.queries == [] and not user.onboarded
+    assert user.trial_used and user.plan_until is not None  # пробный период заново не взять
+    assert any("данные удалены" in p.get("text", "") for _, p in tg.calls)
+    assert any("удалил свои данные" in t for t in tg.texts(ADMIN))
+
+
+async def test_help_and_welcome_mention_privacy(db, tg):
+    bot = make_bot(db, tg, access_mode="open")
+    await bot.handle_update(message(GUEST, "/start"))
+    assert "/privacy" in tg.texts(GUEST)[0]
+    await bot.handle_update(message(GUEST, "/help"))
+    assert "/delete_me" in tg.texts(GUEST)[-1]

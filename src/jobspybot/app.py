@@ -9,11 +9,14 @@ import signal
 from html import escape
 from typing import Any
 
+from jobspybot import __version__
+from jobspybot.admin_web import AdminWeb
 from jobspybot.ai.client import LLMClient
 from jobspybot.ai.service import AIService
 from jobspybot.billing import Billing
 from jobspybot.config import ConfigError, Settings
 from jobspybot.db import Database, User
+from jobspybot.guard import AdminAlerts
 from jobspybot.http import Http
 from jobspybot.pipeline import Pipeline
 from jobspybot.sources import REGISTRY, build_sources
@@ -31,7 +34,11 @@ def wire_ai(bot: Bot, ai: AIService) -> None:
 
     async def on_apply(user: User, cb: dict[str, Any], value: str) -> None:
         """Лучшее резюме под вакансию (файлом) + сопроводительное, написанное под него."""
-        vacancy = bot.db.delivery_vacancy(user.id, int(value)) if value.isdigit() else None
+        vacancy = (
+            bot.db.delivery_vacancy(user.id, int(value))
+            if value.isascii() and value.isdigit()
+            else None
+        )
         if vacancy is None:
             await bot.api.answer_callback(cb["id"], "Вакансия уже удалена из базы")
             return
@@ -67,6 +74,23 @@ async def plan_notices(bot: Bot, stop: asyncio.Event, every: float = 1800) -> No
             await asyncio.wait_for(stop.wait(), timeout=every)
 
 
+async def maintenance(bot: Bot, stop: asyncio.Event, every: float = 6 * 3600) -> None:
+    """Удаление данных неактивных пользователей (политика конфиденциальности, #23)."""
+    days = bot.settings.guard.inactive_days
+    while days and not stop.is_set():
+        try:
+            purged = bot.db.purge_inactive(days)
+            if purged:
+                log.info("purged data of %d inactive users", len(purged))
+                await bot.notify_admins(
+                    f"🧹 Удалены данные {len(purged)} неактивных пользователей (>{days} дн.)"
+                )
+        except Exception:
+            log.exception("maintenance failed")
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=every)
+
+
 async def run(settings: Settings) -> None:
     if not settings.telegram_token:
         raise ConfigError("не задан TELEGRAM_BOT_TOKEN")
@@ -92,11 +116,18 @@ async def run(settings: Settings) -> None:
     billing = Billing(db, settings)
     bot = Bot(api, db, settings, list(sources), billing)
     pipeline = Pipeline(db, sources, bot, settings, billing=billing)
+
+    # ошибки и важные события — админу в Telegram (#21)
+    alerts = AdminAlerts(cooldown_s=settings.guard.alert_cooldown_min * 60)
+    logging.getLogger("jobspybot").addHandler(alerts)
+    pipeline.on_alert = lambda key, text, cooldown: alerts.alert(key, text, cooldown_s=cooldown)
+
     llm: LLMClient | None = None
     if settings.ai.enabled:
         llm = LLMClient(settings.ai.base_url, settings.ai.api_key, settings.ai.model)
         ai = AIService(db, llm, settings.ai)
         ai.describe = pipeline.describe
+        ai.on_alert = alerts.alert
         pipeline.evaluator = ai
         wire_ai(bot, ai)
         log.info("AI enabled: model %s", settings.ai.model)
@@ -116,12 +147,19 @@ async def run(settings: Settings) -> None:
             asyncio.create_task(bot.run(stop), name="telegram"),
             asyncio.create_task(pipeline.run_forever(stop), name="pipeline"),
             asyncio.create_task(plan_notices(bot, stop), name="billing"),
+            asyncio.create_task(alerts.run(bot.notify_admins, stop), name="alerts"),
+            asyncio.create_task(maintenance(bot, stop), name="maintenance"),
         ]
+        if settings.admin_web.enabled:
+            web = AdminWeb(settings, db, billing, bot=bot, pipeline=pipeline, alerts=alerts)
+            tasks.append(asyncio.create_task(web.serve(stop), name="admin-web"))
+        await bot.notify_admins(f"🔄 Бот запущен (v{__version__})")
         await stop.wait()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
+        logging.getLogger("jobspybot").removeHandler(alerts)
         if llm:
             await llm.aclose()
         await api.aclose()

@@ -102,6 +102,15 @@ CREATE TABLE IF NOT EXISTS invites (
     used_by     INTEGER,
     created_at  TEXT NOT NULL
 );
+
+-- суточные счётчики действий (загрузки файлов и т. п.) — защита от злоупотреблений
+CREATE TABLE IF NOT EXISTS counters (
+    user_id  INTEGER NOT NULL,
+    day      TEXT NOT NULL,
+    key      TEXT NOT NULL,
+    n        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day, key)
+);
 """
 
 
@@ -122,10 +131,16 @@ class User:
     last_check: datetime | None = None
     onboarded: bool = False
     notified: str = ""  # последнее отправленное уведомление о подписке
+    banned: bool = False
+    last_seen: datetime | None = None
+    created_at: datetime | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> User:
         return cls(
+            banned=bool(row["banned"]),
+            last_seen=_dt(row["last_seen"]),
+            created_at=_dt(row["created_at"]),
             id=row["id"],
             username=row["username"],
             allowed=bool(row["allowed"]),
@@ -152,6 +167,8 @@ _USER_COLUMNS = [
     ("last_check", "TEXT"),
     ("onboarded", "INTEGER NOT NULL DEFAULT 0"),
     ("notified", "TEXT NOT NULL DEFAULT ''"),
+    ("banned", "INTEGER NOT NULL DEFAULT 0"),
+    ("last_seen", "TEXT"),
 ]
 
 
@@ -255,6 +272,7 @@ class Database:
         cutoff = (utcnow() - timedelta(days=days)).isoformat()
         self.conn.execute("DELETE FROM ai_cache WHERE created_at < ?", (cutoff,))
         self.conn.execute("DELETE FROM ai_usage WHERE day < ?", (cutoff[:10],))
+        self.conn.execute("DELETE FROM counters WHERE day < ?", (cutoff[:10],))
         self.conn.execute("DELETE FROM deliveries WHERE created_at < ?", (cutoff,))
         return self.conn.execute("DELETE FROM vacancies WHERE first_seen < ?", (cutoff,)).rowcount
 
@@ -265,11 +283,14 @@ class Database:
         return User.from_row(row) if row else None
 
     def ensure_user(self, user_id: int, username: str = "", *, allowed: bool = False) -> User:
+        """Создаёт или обновляет пользователя и отмечает его активность."""
+        now = utcnow().isoformat()
         self.conn.execute(
-            "INSERT INTO users(id, username, allowed, created_at) VALUES (?, ?, ?, ?)"
+            "INSERT INTO users(id, username, allowed, created_at, last_seen)"
+            " VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT(id) DO UPDATE SET username = excluded.username,"
-            " allowed = MAX(users.allowed, excluded.allowed)",
-            (user_id, username, int(allowed), utcnow().isoformat()),
+            " allowed = MAX(users.allowed, excluded.allowed), last_seen = excluded.last_seen",
+            (user_id, username, int(allowed), now, now),
         )
         user = self.get_user(user_id)
         assert user is not None
@@ -291,9 +312,69 @@ class Database:
                 "DELETE FROM deliveries WHERE user_id = ? AND status = 'filtered'", (user_id,)
             )
 
+    def set_banned(self, user_id: int, banned: bool) -> None:
+        self.conn.execute("UPDATE users SET banned = ? WHERE id = ?", (int(banned), user_id))
+
     def active_users(self) -> list[User]:
-        rows = self.conn.execute("SELECT * FROM users WHERE allowed = 1 AND paused = 0")
+        rows = self.conn.execute(
+            "SELECT * FROM users WHERE allowed = 1 AND paused = 0 AND banned = 0"
+        )
         return [User.from_row(r) for r in rows]
+
+    # --- счётчики и удаление данных -------------------------------------------
+
+    def bump(self, user_id: int, key: str) -> int:
+        """+1 к суточному счётчику, возвращает новое значение."""
+        day = utcnow().date().isoformat()
+        self.conn.execute(
+            "INSERT INTO counters(user_id, day, key, n) VALUES (?, ?, ?, 1)"
+            " ON CONFLICT(user_id, day, key) DO UPDATE SET n = n + 1",
+            (user_id, day, key),
+        )
+        return self.count_today(user_id, key)
+
+    def count_today(self, user_id: int, key: str) -> int:
+        row = self.conn.execute(
+            "SELECT n FROM counters WHERE user_id = ? AND day = ? AND key = ?",
+            (user_id, utcnow().date().isoformat(), key),
+        ).fetchone()
+        return row[0] if row else 0
+
+    def delete_user_data(self, user_id: int) -> None:
+        """Удаляет резюме, профиль, настройки и историю.
+
+        Остаются только id, доступ, срок Pro, факт пробного периода, бан и платежи:
+        без них человек мог бы бесконечно брать пробный период, а платежи нужны для
+        возвратов и учёта.
+        """
+        with self.conn:
+            for table in ("resumes", "profiles", "deliveries", "ai_usage", "counters"):
+                self.conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+            self.conn.execute(
+                "UPDATE users SET username = '', filters = '{}', resume = '', profile = '',"
+                " paused = 0, onboarded = 0, notified = '', last_check = NULL WHERE id = ?",
+                (user_id,),
+            )
+
+    def inactive_users(self, days: int) -> list[int]:
+        """Кто не писал боту `days` дней, не на Pro и ещё хранит данные."""
+        now = utcnow()
+        cutoff = (now - timedelta(days=days)).isoformat()
+        rows = self.conn.execute(
+            "SELECT id FROM users WHERE COALESCE(last_seen, created_at) < ?"
+            " AND (plan_until IS NULL OR plan_until < ?)"
+            " AND (onboarded = 1 OR filters != '{}'"
+            "      OR id IN (SELECT user_id FROM resumes)"
+            "      OR id IN (SELECT user_id FROM profiles))",
+            (cutoff, now.isoformat()),
+        )
+        return [r[0] for r in rows]
+
+    def purge_inactive(self, days: int) -> list[int]:
+        ids = self.inactive_users(days)
+        for uid in ids:
+            self.delete_user_data(uid)
+        return ids
 
     def all_users(self) -> list[User]:
         return [User.from_row(r) for r in self.conn.execute("SELECT * FROM users ORDER BY id")]
@@ -534,6 +615,61 @@ class Database:
                 "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE currency = 'XTR'"
             ).fetchone()[0],
         }
+
+    # --- веб-админка -----------------------------------------------------------
+
+    def funnel(self) -> dict[str, int]:
+        """Воронка: зашли → получили доступ → настроили → загрузили резюме → платят."""
+        q = self.conn.execute
+        return {
+            "started": q("SELECT COUNT(*) FROM users").fetchone()[0],
+            "allowed": q("SELECT COUNT(*) FROM users WHERE allowed = 1").fetchone()[0],
+            "onboarded": q("SELECT COUNT(*) FROM users WHERE onboarded = 1").fetchone()[0],
+            "with_resume": q("SELECT COUNT(DISTINCT user_id) FROM resumes").fetchone()[0],
+            "paying": q("SELECT COUNT(DISTINCT user_id) FROM payments").fetchone()[0],
+            "banned": q("SELECT COUNT(*) FROM users WHERE banned = 1").fetchone()[0],
+        }
+
+    def tokens_since(self, day: str) -> int:
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(tokens), 0) FROM ai_usage WHERE day >= ?", (day,)
+        ).fetchone()
+        return row[0]
+
+    def search_users(self, query: str = "", *, limit: int = 50, offset: int = 0) -> list[User]:
+        """Поиск по id или имени; свежие активные — первыми."""
+        sql = "SELECT * FROM users"
+        args: list[object] = []
+        if query:
+            sql += " WHERE CAST(id AS TEXT) LIKE ? ESCAPE '!' OR username LIKE ? ESCAPE '!'"
+            escaped = query.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            like = f"%{escaped}%"
+            args += [like, like]
+        sql += " ORDER BY COALESCE(last_seen, created_at) DESC LIMIT ? OFFSET ?"
+        args += [limit, offset]
+        return [User.from_row(r) for r in self.conn.execute(sql, args)]
+
+    def resume_counts(self) -> dict[int, int]:
+        rows = self.conn.execute("SELECT user_id, COUNT(*) FROM resumes GROUP BY user_id")
+        return {r[0]: r[1] for r in rows}
+
+    def list_invites(self, limit: int = 30) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT code, created_by, used_by, created_at FROM invites"
+                " ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        )
+
+    def payments_of(self, user_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT amount, currency, recurring, created_at FROM payments"
+                " WHERE user_id = ? ORDER BY id DESC",
+                (user_id,),
+            )
+        )
 
     # --- профиль ---------------------------------------------------------------
 
