@@ -31,10 +31,23 @@ CREATE TABLE IF NOT EXISTS users (
     allowed     INTEGER NOT NULL DEFAULT 0,
     paused      INTEGER NOT NULL DEFAULT 0,
     filters     TEXT NOT NULL DEFAULT '{}',
-    resume      TEXT NOT NULL DEFAULT '',
-    profile     TEXT NOT NULL DEFAULT '',     -- сжатое ИИ резюме
+    resume      TEXT NOT NULL DEFAULT '',     -- устарело: см. таблицу resumes
+    profile     TEXT NOT NULL DEFAULT '',     -- устарело: см. таблицу resumes
     created_at  TEXT NOT NULL
 );
+
+-- у пользователя может быть несколько резюме; ИИ выбирает лучшее под вакансию
+CREATE TABLE IF NOT EXISTS resumes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title       TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    profile     TEXT NOT NULL DEFAULT '',     -- сжатый ИИ профиль (JSON)
+    file_id     TEXT,                         -- Telegram file_id: файл не храним, пересылаем
+    file_name   TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_resumes_user ON resumes(user_id);
 
 -- что и почему пользователь получил / не получил
 CREATE TABLE IF NOT EXISTS deliveries (
@@ -85,8 +98,6 @@ class User:
     allowed: bool
     paused: bool
     filters: UserFilters
-    resume: str
-    profile: str
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> User:
@@ -96,9 +107,31 @@ class User:
             allowed=bool(row["allowed"]),
             paused=bool(row["paused"]),
             filters=UserFilters.from_json(row["filters"]),
-            resume=row["resume"],
-            profile=row["profile"],
         )
+
+
+@dataclass(slots=True)
+class Resume:
+    id: int
+    user_id: int
+    title: str
+    text: str
+    profile: str
+    file_id: str | None
+    file_name: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> Resume:
+        return cls(**{k: row[k] for k in cls.__slots__})
+
+    @property
+    def skills(self) -> list[str]:
+        if not self.profile:
+            return []
+        try:
+            return [str(s) for s in json.loads(self.profile).get("skills") or []]
+        except (ValueError, AttributeError):
+            return []
 
 
 class Database:
@@ -112,6 +145,17 @@ class Database:
         # маленький кэш страниц — экономим RAM
         self.conn.execute("PRAGMA cache_size=-2000")
         self.conn.executescript(SCHEMA)
+        self._migrate_legacy_resumes()
+
+    def _migrate_legacy_resumes(self) -> None:
+        """Резюме из старой колонки users.resume переносятся в таблицу resumes."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO resumes(user_id, title, text, profile, created_at)"
+                " SELECT id, 'Резюме', resume, profile, created_at FROM users"
+                " WHERE resume != '' AND id NOT IN (SELECT user_id FROM resumes)"
+            )
+            self.conn.execute("UPDATE users SET resume = '', profile = '' WHERE resume != ''")
 
     def close(self) -> None:
         self.conn.close()
@@ -191,11 +235,6 @@ class Database:
             self.conn.execute(
                 "DELETE FROM deliveries WHERE user_id = ? AND status = 'filtered'", (user_id,)
             )
-
-    def save_resume(self, user_id: int, resume: str, profile: str = "") -> None:
-        self.conn.execute(
-            "UPDATE users SET resume = ?, profile = ? WHERE id = ?", (resume, profile, user_id)
-        )
 
     def active_users(self) -> list[User]:
         rows = self.conn.execute("SELECT * FROM users WHERE allowed = 1 AND paused = 0")
@@ -317,3 +356,41 @@ class Database:
             (user_id, utcnow().date().isoformat()),
         ).fetchone()
         return row[0] if row else 0
+
+    # --- резюме ---------------------------------------------------------------
+
+    def add_resume(
+        self,
+        user_id: int,
+        title: str,
+        text: str,
+        *,
+        file_id: str | None = None,
+        file_name: str | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO resumes(user_id, title, text, file_id, file_name, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, title, text, file_id, file_name, utcnow().isoformat()),
+        )
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def set_resume_profile(self, resume_id: int, profile: str) -> None:
+        self.conn.execute("UPDATE resumes SET profile = ? WHERE id = ?", (profile, resume_id))
+
+    def get_resumes(self, user_id: int) -> list[Resume]:
+        rows = self.conn.execute("SELECT * FROM resumes WHERE user_id = ? ORDER BY id", (user_id,))
+        return [Resume.from_row(r) for r in rows]
+
+    def get_resume(self, user_id: int, resume_id: int) -> Resume | None:
+        row = self.conn.execute(
+            "SELECT * FROM resumes WHERE user_id = ? AND id = ?", (user_id, resume_id)
+        ).fetchone()
+        return Resume.from_row(row) if row else None
+
+    def delete_resume(self, user_id: int, resume_id: int) -> bool:
+        cur = self.conn.execute(
+            "DELETE FROM resumes WHERE user_id = ? AND id = ?", (user_id, resume_id)
+        )
+        return cur.rowcount > 0
