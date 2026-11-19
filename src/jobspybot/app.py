@@ -148,6 +148,7 @@ async def run(settings: Settings, runtime: Runtime | None = None) -> bool:
         tasks = [
             asyncio.create_task(bot.run(stop), name="telegram"),
             asyncio.create_task(pipeline.run_forever(stop), name="pipeline"),
+            asyncio.create_task(pipeline.flush_forever(stop), name="digest"),
             asyncio.create_task(plan_notices(bot, stop), name="billing"),
             asyncio.create_task(alerts.run(bot.notify_admins, stop), name="alerts"),
             asyncio.create_task(maintenance(bot, stop), name="maintenance"),

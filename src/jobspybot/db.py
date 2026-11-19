@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
     user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     vacancy_uid  TEXT NOT NULL,
     fingerprint  TEXT NOT NULL,
-    status       TEXT NOT NULL,               -- sent | filtered | ai_rejected | disliked
+    status       TEXT NOT NULL,  -- sent | queued | skipped | filtered | ai_rejected | disliked
     reason       TEXT NOT NULL DEFAULT '',
     score        INTEGER,
     created_at   TEXT NOT NULL,
@@ -448,6 +448,30 @@ class Database:
         ).fetchone()
         return self.get_vacancy(row[0]) if row else None
 
+    def queued(self, user_id: int) -> list[tuple[int, Vacancy, str, int | None]]:
+        """Отложенные вакансии (тихие часы, дайджест): rowid, вакансия, оценка ИИ, балл.
+
+        Вакансии, удалённые из базы за старостью, сразу помечаются пропущенными.
+        """
+        rows = self.conn.execute(
+            "SELECT d.rowid AS rowid, d.reason, d.score, v.data FROM deliveries d"
+            " LEFT JOIN vacancies v ON v.uid = d.vacancy_uid"
+            " WHERE d.user_id = ? AND d.status = 'queued' ORDER BY d.created_at",
+            (user_id,),
+        ).fetchall()
+        out = []
+        for row in rows:
+            if row["data"] is None:
+                self.set_status(user_id, row["rowid"], "skipped")
+                continue
+            vacancy = Vacancy.from_dict(json.loads(row["data"]))
+            out.append((row["rowid"], vacancy, row["reason"], row["score"]))
+        return out
+
+    def users_with_queue(self) -> list[int]:
+        rows = self.conn.execute("SELECT DISTINCT user_id FROM deliveries WHERE status = 'queued'")
+        return [r[0] for r in rows]
+
     def set_status(self, user_id: int, delivery_id: int, status: str) -> None:
         self.conn.execute(
             "UPDATE deliveries SET status = ? WHERE user_id = ? AND rowid = ?",
@@ -579,8 +603,8 @@ class Database:
     def sent_today(self, user_id: int) -> int:
         day = utcnow().date().isoformat()
         row = self.conn.execute(
-            "SELECT COUNT(*) FROM deliveries WHERE user_id = ? AND status IN ('sent', 'disliked')"
-            " AND created_at >= ?",
+            "SELECT COUNT(*) FROM deliveries WHERE user_id = ?"
+            " AND status IN ('sent', 'disliked', 'queued') AND created_at >= ?",
             (user_id, day),
         ).fetchone()
         return row[0]
