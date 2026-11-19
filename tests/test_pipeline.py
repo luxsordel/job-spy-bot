@@ -166,3 +166,17 @@ async def test_source_health_and_silence_alert(db, pipeline_factory):
     keys = [k for k, _, _ in alerts]
     assert keys == ["source:habr", "source:praca_by"] and "403" in alerts[1][1]
     assert pipeline.last_cycle is not None and pipeline.last_cycle.fetched == 1
+
+
+async def test_cycle_writes_live_log(db, pipeline_factory, caplog):
+    a = FakeSource("a", {"go": [vac("a", "1", "Go Dev")]})
+    add_user(db, 1, queries=["go"])
+    p = pipeline_factory([a])
+    with caplog.at_level("INFO", logger="jobspybot"):
+        await p.run_cycle()
+    lines = [(r.name, r.getMessage()) for r in caplog.records]
+    assert any(n == "jobspybot.sources" and t.startswith("a «go»: 1 вакансий за") for n, t in lines)
+    texts = [t for _, t in lines]
+    assert "→ 1 @u1: «Go Dev» (a, балл 50)" in texts
+    assert "1 @u1: отсеяно 0, оценил ИИ 0, отклонил ИИ 0, отправлено 1" in texts
+    assert p.cycle_started is None  # после цикла флаг снят

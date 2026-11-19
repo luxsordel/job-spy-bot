@@ -704,3 +704,18 @@ async def test_help_and_welcome_mention_privacy(db, tg):
     assert "/privacy" in tg.texts(GUEST)[0]
     await bot.handle_update(message(GUEST, "/help"))
     assert "/delete_me" in tg.texts(GUEST)[-1]
+
+
+def test_describe_update_hides_message_text():
+    from jobspybot.telegram.bot import describe_update
+
+    sender = {"id": 7, "username": "misha"}
+    assert describe_update({"message": {"from": sender, "text": "/start abc"}}) == (
+        "7 @misha: /start"
+    )
+    assert describe_update({"message": {"from": sender, "text": "моё резюме"}}) == (
+        "7 @misha: текст, 10 симв."
+    )
+    assert describe_update({"callback_query": {"from": {"id": 7}, "data": "menu"}}) == (
+        "7: кнопка menu"
+    )
