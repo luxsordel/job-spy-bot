@@ -14,6 +14,12 @@ from jobspybot.config import Settings
 from jobspybot.db import Database, Resume, User, utcnow
 from jobspybot.filters import COUNTRIES, UserFilters
 from jobspybot.models import Level, Vacancy
+from jobspybot.profile import (
+    RELOCATION_COUNTRIES,
+    SALARY_PRESETS,
+    WORK_FORMATS,
+    apply_to_filters,
+)
 from jobspybot.resume_files import (
     MAX_FILE_BYTES,
     ResumeFileError,
@@ -35,6 +41,7 @@ log = logging.getLogger(__name__)
 COMMANDS = [
     ("start", "Главное меню"),
     ("search", "Мой поиск"),
+    ("profile", "Профиль"),
     ("filters", "Фильтры"),
     ("resumes", "Мои резюме"),
     ("plan", "Подписка"),
@@ -53,7 +60,6 @@ BOT_SHORT_DESCRIPTION = "Вакансии BY · RU · KZ · GE · PL с ИИ-о�
 
 _SPLIT = re.compile(r"[;,\n]+")
 MAX_RESUME_CHARS = 8000
-ONBOARDING_STEPS = 4
 
 ResumeHook = Callable[[User, Resume], Awaitable[str]]
 CallbackHook = Callable[[User, dict[str, Any], str], Awaitable[None]]
@@ -85,6 +91,8 @@ class Bot:
         #: ожидаемый текстовый ввод: user_id → поле (resume, queries, exclude, salary, skills)
         self._awaiting: dict[int, str] = {}
         self._cap_notified: dict[int, str] = {}
+        #: режим анкеты: ob — онбординг, fill — дозаполнение, edit — правка одного поля
+        self._profile_mode: dict[int, str] = {}
         #: обработчик нового резюме (подключается модулем ИИ); возвращает ответ пользователю
         self.on_resume: ResumeHook | None = None
         #: дополнительные кнопки под вакансией: префикс → (текст, обработчик)
@@ -95,6 +103,7 @@ class Bot:
             r.BTN_FILTERS: self.show_filters,
             r.BTN_PLAN: self.show_plan,
             r.BTN_STATS: self.show_stats,
+            r.BTN_PROFILE: self.show_profile,
             r.BTN_HELP: self.show_help,
         }
 
@@ -296,62 +305,161 @@ class Bot:
             return
         trial = self.billing.start_trial(user) and self.settings.billing.trial_days
         await self.reply(user, r.welcome(first_name, trial or 0), main_menu())
-        await self._onboarding(user, 1)
-
-    async def _onboarding(self, user: User, step: int, msg: dict[str, Any] | None = None) -> None:
-        f = user.filters
-        if step == 1:
-            text = r.onboarding_step(
-                1,
-                ONBOARDING_STEPS,
-                "Что ищем?",
-                "Выберите направления (можно несколько) или нажмите «✍️ Свой вариант».",
-            )
-            markup = self._directions_markup(user, ctx="ob", next_step=2)
-        elif step == 2:
-            text = r.onboarding_step(2, ONBOARDING_STEPS, "Какой уровень?", "Можно несколько.")
-            markup = self._toggle_markup(
-                "ob", "lvl", r.LEVEL_BUTTONS, f.levels, nav=[button("Далее ➡️", data="ob:go:3")]
-            )
-        elif step == 3:
-            text = r.onboarding_step(
-                3, ONBOARDING_STEPS, "Где искать?", "Не выбрано — значит во всех странах."
-            )
-            markup = self._toggle_markup(
-                "ob", "cty", COUNTRIES, f.countries, nav=[button("Далее ➡️", data="ob:go:4")]
-            )
-        else:
-            text = r.onboarding_step(
-                4,
-                ONBOARDING_STEPS,
-                "Пришлите резюме PDF 📄",
-                "ИИ сравнит его с каждой вакансией и скажет, есть ли шанс. "
-                "Можно прислать несколько под разные роли — выберу лучшее для каждой вакансии.",
-            )
-            self._awaiting[user.id] = "resume"
-            markup = inline_keyboard([button("Пропустить ➡️", data="ob:done")])
-        if msg:
-            await self.edit(msg, text, markup)
-        else:
-            await self.reply(user, text, markup)
+        self._awaiting[user.id] = "resume"
+        self._profile_mode[user.id] = "ob"
+        await self.reply(
+            user,
+            "<b>📄 Пришлите резюме — PDF или .txt</b>\n\n"
+            "Я сам достану из него навыки, опыт и пожелания, заполню профиль и настрою поиск. "
+            "Спрошу только то, чего в резюме нет.",
+            inline_keyboard([button("✍️ Нет резюме — отвечу на вопросы", data="ob:manual")]),
+        )
 
     async def _finish_onboarding(self, user: User) -> None:
         self._awaiting.pop(user.id, None)
         self.db.set_onboarded(user.id)
         user.onboarded = True
         plan = self.billing.plan(user)
-        every = plan.check_every_min
+        summary = r.search_summary(
+            user.filters,
+            self.available_sources,
+            paused=user.paused,
+            resumes=self._resume_count(user),
+            plan=plan,
+            check_every_min=plan.check_every_min,
+        )
         await self.reply(
             user,
-            "🎉 <b>Готово!</b> Поиск запущен.\n\n"
-            f"Первая подборка придёт в течение {min(every, 30)} минут, дальше — по мере появления "
-            "новых вакансий. Настройки всегда в меню ниже.",
+            "🎉 <b>Готово! Поиск настроен и запущен.</b>\n\n"
+            f"{summary}\n\n"
+            f"Первая подборка придёт в течение {min(plan.check_every_min, 30)} минут. "
+            "Поправить что угодно — 👤 Профиль или ⚙️ Фильтры.",
             main_menu(),
         )
 
-    # --- выборки (общие для онбординга и фильтров) ---------------------------
+    # --- профиль и анкета -----------------------------------------------------
 
-    def _directions_markup(self, user: User, *, ctx: str, next_step: int | None) -> dict[str, Any]:
+    def _apply_profile(self, user: User) -> None:
+        """Анкета поиска из профиля."""
+        profile = self.db.get_profile(user.id)
+        apply_to_filters(profile, user.filters, max_queries=self.billing.plan(user).max_queries)
+        self.db.save_filters(user.id, user.filters)
+
+    async def _ask_next(self, user: User, msg: dict[str, Any] | None = None) -> None:
+        """Следующий вопрос анкеты или завершение, если профиль заполнен."""
+        missing = self.db.get_profile(user.id).missing(user.filters)
+        if not missing:
+            await self._complete_profile(user, msg)
+            return
+        await self._show_question(user, missing[0], msg)
+
+    async def _complete_profile(self, user: User, msg: dict[str, Any] | None) -> None:
+        self._apply_profile(user)
+        self._profile_mode.pop(user.id, None)
+        if not user.onboarded:
+            if msg:
+                await self.edit(msg, "✅ Профиль заполнен", None)
+            await self._finish_onboarding(user)
+        else:
+            await self.show_profile(user, msg)
+
+    async def _after_answer(self, user: User, msg: dict[str, Any] | None) -> None:
+        if self._profile_mode.get(user.id) == "edit":
+            self._profile_mode.pop(user.id, None)
+            self._apply_profile(user)
+            await self.show_profile(user, msg)
+        else:
+            await self._ask_next(user, msg)
+
+    def _question_markup(self, user: User, key: str) -> dict[str, Any]:
+        profile = self.db.get_profile(user.id)
+        back = (
+            [button("⬅️ К профилю", data="pe:show")]
+            if self._profile_mode.get(user.id) == "edit"
+            else []
+        )
+        if key == "directions":
+            return self._directions_markup(
+                user, ctx="pq", done=button("Готово ➡️", data="pq:next:directions")
+            )
+        if key == "level":
+            options = {k: v for k, v in r.LEVEL_BUTTONS.items()}
+            selected = [profile.level] if profile.level else []
+            return self._toggle_markup("pq", "level", options, selected, nav=back)
+        if key == "work_formats":
+            return self._toggle_markup(
+                "pq",
+                "fmt",
+                WORK_FORMATS,
+                profile.work_formats,
+                nav=[*back, button("Далее ➡️", data="pq:next:work_formats")],
+                per_row=3,
+            )
+        if key == "relocation":
+            return inline_keyboard(
+                [button("✈️ Да, готов", data="pq:reloc:yes"), button("Нет", data="pq:reloc:no")],
+                back,
+            )
+        if key == "relocation_countries":
+            return self._toggle_markup(
+                "pq",
+                "rc",
+                RELOCATION_COUNTRIES,
+                profile.relocation_countries,
+                nav=[*back, button("Далее ➡️", data="pq:next:relocation_countries")],
+            )
+        # salary
+        presets = [button(f"от {v}$", data=f"pq:sal:{v}") for v in SALARY_PRESETS]
+        return inline_keyboard(
+            presets[:3],
+            presets[3:],
+            [button("Не важно", data="pq:sal:0"), button("✍️ Своя сумма", data="pq:salc")],
+            back,
+        )
+
+    async def _show_question(self, user: User, key: str, msg: dict[str, Any] | None) -> None:
+        text = r.question(key)
+        markup = self._question_markup(user, key)
+        if msg:
+            await self.edit(msg, text, markup)
+        else:
+            await self.reply(user, text, markup)
+
+    async def show_profile(self, user: User, msg: dict[str, Any] | None = None) -> None:
+        profile = self.db.get_profile(user.id)
+        missing = profile.missing(user.filters)
+        text = r.profile_card(profile, user.filters.queries)
+        if profile.is_empty:
+            text += "\n\n<i>Пришлите резюме PDF — заполню профиль автоматически.</i>"
+        rows = [
+            [
+                button("🔍 Направления", data="pe:directions"),
+                button("🎓 Уровень", data="pe:level"),
+            ],
+            [
+                button("🏢 Формат", data="pe:work_formats"),
+                button("✈️ Релокация", data="pe:relocation"),
+            ],
+            [button("💰 Зарплата", data="pe:salary"), button("🧩 Навыки", data="pe:skills")],
+        ]
+        if missing:
+            rows.insert(0, [button(f"✍️ Дозаполнить ({len(missing)})", data="pe:fill_missing")])
+        if self.on_resume and self.db.get_resumes(user.id):
+            rows.append([button("📄 Обновить из резюме", data="pe:fill")])
+        markup = inline_keyboard(*rows)
+        if msg:
+            await self.edit(msg, text, markup)
+        else:
+            await self.reply(user, text, markup)
+
+    async def cmd_profile(self, user: User, args: str) -> None:
+        await self.show_profile(user)
+
+    # --- выборки (общие для анкеты и фильтров) -------------------------------
+
+    def _directions_markup(
+        self, user: User, *, ctx: str, done: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         selected = {q.lower() for q in user.filters.queries}
         keys = list(r.DIRECTIONS)
         rows = []
@@ -371,10 +479,7 @@ class Bot:
                 [button(f"✅ {q[:40]}", data=f"{ctx}:dirx:{user.filters.queries.index(q)}")]
             )
         nav = [button("✍️ Свой вариант", data=f"{ctx}:custom")]
-        if next_step:
-            nav.append(button("Далее ➡️", data=f"ob:go:{next_step}"))
-        else:
-            nav.append(button("⬅️ Назад", data="f:menu"))
+        nav.append(done or button("⬅️ Назад", data="f:menu"))
         rows.append(nav)
         return inline_keyboard(*rows)
 
@@ -432,7 +537,14 @@ class Bot:
             if user.paused
             else button("⏸ Пауза", data="f:pause")
         )
-        await self.reply(user, text, inline_keyboard([button("⚙️ Изменить", data="f:menu"), pause]))
+        await self.reply(
+            user,
+            text,
+            inline_keyboard(
+                [button("⚙️ Изменить", data="f:menu"), pause],
+                [button("📊 Статистика", data="st:show"), button("👤 Профиль", data="pe:show")],
+            ),
+        )
 
     def _filters_menu(self, user: User) -> tuple[str, dict[str, Any]]:
         f = user.filters
@@ -721,7 +833,6 @@ class Bot:
         file_id: str | None = None,
         file_name: str | None = None,
     ) -> None:
-        onboarding = self._awaiting.get(user.id) == "resume" and not user.onboarded
         self._awaiting.pop(user.id, None)
         text = text.strip()[:MAX_RESUME_CHARS]
         if len(text) < 50:
@@ -740,8 +851,23 @@ class Bot:
             await self.reply(user, await self.on_resume(user, resume))
         else:
             await self.reply(user, f"✅ Резюме «{escape(title)}» сохранено.")
-        if onboarding or not user.onboarded:
-            await self._finish_onboarding(user)
+        if not user.onboarded:
+            self._profile_mode[user.id] = "ob"
+            await self.reply(
+                user,
+                r.profile_card(
+                    self.db.get_profile(user.id),
+                    user.filters.queries,
+                    title="👤 Вот что я понял из резюме",
+                ),
+            )
+            await self._ask_next(user)
+        elif self.on_resume:
+            await self.reply(
+                user,
+                "Профиль дополнен данными из резюме.",
+                inline_keyboard([button("👤 Открыть профиль", data="pe:show")]),
+            )
 
     # --- текстовый ввод -------------------------------------------------------
 
@@ -750,7 +876,34 @@ class Bot:
         if field == "resume":
             await self._save_resume(user, text, title=f"Резюме {self._resume_count(user) + 1}")
             return
-        if field in ("queries", "queries_ob"):
+        if field == "queries_pq":
+            for q in parse_list(text):
+                if err := self._toggle_query(user, q, add_only=True):
+                    await self.reply(user, err)
+                    break
+            await self._show_question(user, "directions", None)
+            return
+        if field == "salary_pq":
+            digits = re.sub(r"\D", "", text)
+            if not digits:
+                self._awaiting[user.id] = field
+                await self.reply(user, "Нужно число в долларах, например 1200.")
+                return
+            profile = self.db.get_profile(user.id)
+            profile.salary_usd = int(digits)
+            profile.mark("salary")
+            self.db.save_profile(user.id, profile)
+            await self._after_answer(user, None)
+            return
+        if field == "skills_pq":
+            profile = self.db.get_profile(user.id)
+            profile.skills = [] if text.strip() == "-" else parse_list(text)[:40]
+            self.db.save_profile(user.id, profile)
+            f.skills = profile.skills
+            self.db.save_filters(user.id, f)
+            await self.show_profile(user)
+            return
+        if field == "queries":
             errors = [
                 err for q in parse_list(text) if (err := self._toggle_query(user, q, add_only=True))
             ]
@@ -758,14 +911,7 @@ class Bot:
                 await self.reply(
                     user, errors[0], inline_keyboard([button("💎 Pro", data="plan:show")])
                 )
-            if field == "queries_ob":
-                await self._onboarding(user, 1)
-            else:
-                await self.reply(
-                    user,
-                    "🔍 Направления",
-                    self._directions_markup(user, ctx="f", next_step=None),
-                )
+            await self.reply(user, "🔍 Направления", self._directions_markup(user, ctx="f"))
             return
         if field == "exclude":
             f.exclude = [] if text.strip() == "-" else parse_list(text)
@@ -926,6 +1072,9 @@ class Bot:
             "nope": self._cb_nope,
             "rdel": self._cb_resume_delete,
             "ob": self._cb_onboarding,
+            "pq": self._cb_question,
+            "pe": self._cb_profile,
+            "st": self._cb_stats,
             "f": self._cb_filters,
             "plan": self._cb_plan,
             "sub": self._cb_subscription,
@@ -957,43 +1106,106 @@ class Bot:
             await self.edit(msg, text, markup)
 
     async def _cb_onboarding(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        await self.api.answer_callback(cb["id"])
+        if value == "manual":
+            self._awaiting.pop(user.id, None)
+            self._profile_mode[user.id] = "ob"
+            await self._ask_next(user, msg or None)
+
+    async def _cb_question(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        """Ответы на вопросы анкеты профиля."""
         action, _, arg = value.partition(":")
-        f = user.filters
+        profile = self.db.get_profile(user.id)
         note = None
+        answered = False
+        rerender: str | None = None
         if action == "dir" and arg in r.DIRECTIONS:
             note = self._toggle_query(user, r.DIRECTIONS[arg][1])
-            await self._onboarding(user, 1, msg)
-        elif action == "dirx" and arg.isdigit() and int(arg) < len(f.queries):
-            self._toggle_query(user, f.queries[int(arg)])
-            await self._onboarding(user, 1, msg)
+            rerender = "directions"
+        elif action == "dirx" and arg.isdigit() and int(arg) < len(user.filters.queries):
+            self._toggle_query(user, user.filters.queries[int(arg)])
+            rerender = "directions"
         elif action == "custom":
-            self._awaiting[user.id] = "queries_ob"
-            note = "Напишите направления через запятую"
+            self._awaiting[user.id] = "queries_pq"
             await self.reply(
                 user,
-                "✍️ Напишите, что ищете — через запятую.\nНапример: <i>python developer, "
-                "тестировщик, аналитик данных</i>",
+                "✍️ Напишите, что ищете — через запятую.\n"
+                "Например: <i>python developer, тестировщик, аналитик данных</i>",
             )
-        elif action == "lvl" and arg in r.LEVEL_BUTTONS:
-            f.levels = [x for x in f.levels if x != arg] if arg in f.levels else [*f.levels, arg]
-            self.db.save_filters(user.id, f)
-            await self._onboarding(user, 2, msg)
-        elif action == "cty" and arg in COUNTRIES:
-            f.countries = (
-                [x for x in f.countries if x != arg] if arg in f.countries else [*f.countries, arg]
-            )
-            self.db.save_filters(user.id, f)
-            await self._onboarding(user, 3, msg)
-        elif action == "go" and arg.isdigit():
-            if int(arg) == 2 and not f.queries:
-                note = "Выберите хотя бы одно направление"
+        elif action == "level" and arg in r.LEVEL_BUTTONS:
+            profile.level = arg
+            profile.mark("level")
+            answered = True
+        elif action == "fmt" and arg in WORK_FORMATS:
+            fmts = profile.work_formats
+            profile.work_formats = [x for x in fmts if x != arg] if arg in fmts else [*fmts, arg]
+            rerender = "work_formats"
+        elif action == "reloc":
+            profile.relocation = arg == "yes"
+            if profile.relocation:
+                rerender = "relocation_countries"
             else:
-                await self._onboarding(user, int(arg), msg)
-        elif action == "done":
-            if msg:
-                await self.api.edit_reply_markup(msg["chat"]["id"], msg["message_id"], None)
-            await self._finish_onboarding(user)
+                profile.relocation_countries = []
+                profile.mark("relocation")
+                answered = True
+        elif action == "rc" and arg in RELOCATION_COUNTRIES:
+            rc = profile.relocation_countries
+            profile.relocation_countries = [x for x in rc if x != arg] if arg in rc else [*rc, arg]
+            rerender = "relocation_countries"
+        elif action == "sal" and arg.isdigit():
+            profile.salary_usd = int(arg)
+            profile.mark("salary")
+            answered = True
+        elif action == "salc":
+            self._awaiting[user.id] = "salary_pq"
+            await self.reply(user, "💰 Напишите сумму в $ в месяц, например <b>1300</b>.")
+        elif action == "next":
+            if arg == "directions" and not user.filters.queries:
+                note = "Выберите хотя бы одно направление"
+            elif arg == "work_formats" and not profile.work_formats:
+                note = "Выберите хотя бы один формат"
+            else:
+                profile.mark("relocation" if arg == "relocation_countries" else arg)
+                answered = True
+        self.db.save_profile(user.id, profile)
         await self.api.answer_callback(cb["id"], note)
+        if rerender:
+            await self._show_question(user, rerender, msg or None)
+        elif answered:
+            await self._after_answer(user, msg or None)
+
+    async def _cb_profile(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        """Кнопки экрана профиля."""
+        await self.api.answer_callback(cb["id"])
+        if value == "show":
+            self._profile_mode.pop(user.id, None)
+            await self.show_profile(user, msg or None)
+        elif value in ("directions", "level", "work_formats", "relocation", "salary"):
+            self._profile_mode[user.id] = "edit"
+            await self._show_question(user, value, msg or None)
+        elif value == "skills":
+            profile = self.db.get_profile(user.id)
+            self._awaiting[user.id] = "skills_pq"
+            await self.reply(
+                user,
+                f"🧩 Сейчас: {escape(', '.join(profile.skills)) or '—'}\n\n"
+                "Напишите навыки через запятую — по ним вакансии отбираются бесплатно, до ИИ.",
+            )
+        elif value == "fill_missing":
+            self._profile_mode[user.id] = "fill"
+            await self._ask_next(user, msg or None)
+        elif value == "fill" and self.on_resume:
+            resumes = self.db.get_resumes(user.id)
+            if not resumes:
+                return
+            await self.reply(user, f"⏳ Перечитываю «{escape(resumes[-1].title)}»…")
+            await self.reply(user, await self.on_resume(user, resumes[-1]))
+            self._apply_profile(user)
+            await self.show_profile(user)
+
+    async def _cb_stats(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        await self.api.answer_callback(cb["id"])
+        await self.show_stats(user)
 
     async def _cb_filters(self, user: User, cb: dict, value: str, msg: dict) -> None:
         action, _, arg = value.partition(":")
@@ -1009,14 +1221,14 @@ class Bot:
             await self.edit(
                 msg,
                 "<b>🔍 Направления</b>\nЧто ищем? Можно несколько.",
-                self._directions_markup(user, ctx="f", next_step=None),
+                self._directions_markup(user, ctx="f"),
             )
         elif action == "dirx" and arg.isdigit() and int(arg) < len(f.queries):
             self._toggle_query(user, f.queries[int(arg)])
             await self.edit(
                 msg,
                 "<b>🔍 Направления</b>\nЧто ищем? Можно несколько.",
-                self._directions_markup(user, ctx="f", next_step=None),
+                self._directions_markup(user, ctx="f"),
             )
         elif action == "custom":
             self._awaiting[user.id] = "queries"

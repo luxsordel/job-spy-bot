@@ -110,6 +110,14 @@ def onboarded_user(db, uid: int, **filters) -> None:
         db.save_filters(uid, UserFilters(**filters))
 
 
+def shown(tg: FakeTelegram) -> str:
+    """Текст последнего отправленного или отредактированного сообщения."""
+    for method, payload in reversed(tg.calls):
+        if method in ("sendMessage", "editMessageText"):
+            return payload["text"]
+    return ""
+
+
 def buttons(tg: FakeTelegram) -> list[dict]:
     """Все inline-кнопки последнего сообщения/редактирования."""
     for method, payload in reversed(tg.calls):
@@ -138,7 +146,7 @@ async def test_open_mode_admits_with_trial_and_onboarding(db, tg):
     assert bot.billing.plan(user).name == "pro" and bot.billing.is_trial(user)
     texts = tg.texts(GUEST)
     assert "Pro на 7 дней" in texts[0]
-    assert "Шаг 1 из 4" in texts[1]
+    assert "Пришлите резюме" in texts[1]
     assert any("Новый пользователь" in t for t in tg.texts(ADMIN))
 
 
@@ -147,7 +155,7 @@ async def test_invite_flow_starts_onboarding(bot, tg, db):
     code = tg.texts(ADMIN)[-1].split("start=")[1]
     await bot.handle_update(message(GUEST, f"/start {code}"))
     assert db.get_user(GUEST).allowed
-    assert "Шаг 1 из 4" in tg.texts(GUEST)[-1]
+    assert "Пришлите резюме" in tg.texts(GUEST)[-1]
     await bot.handle_update(message(300, f"/start {code}"))  # ссылка одноразовая
     assert not db.get_user(300).allowed
 
@@ -160,41 +168,96 @@ async def test_admin_approves_by_button(bot, tg, db):
     assert db.get_user(300) is None
 
 
-async def test_full_onboarding(db, tg):
+async def test_manual_onboarding_questionnaire(db, tg):
     bot = make_bot(db, tg, access_mode="open", trial_days=7)
     await bot.handle_update(message(GUEST, "/start"))
-    await bot.handle_update(callback(GUEST, "ob:go:2"))  # без направлений дальше нельзя
+    await bot.handle_update(callback(GUEST, "ob:manual"))
+    assert "Что ищем?" in shown(tg)
+    await bot.handle_update(callback(GUEST, "pq:next:directions"))
     assert tg.calls[-1][1]["text"] == "Выберите хотя бы одно направление"
-    await bot.handle_update(callback(GUEST, "ob:dir:py"))
-    await bot.handle_update(callback(GUEST, "ob:dir:qa"))
-    await bot.handle_update(callback(GUEST, "ob:custom"))
+    await bot.handle_update(callback(GUEST, "pq:dir:py"))
+    await bot.handle_update(callback(GUEST, "pq:custom"))
     await bot.handle_update(message(GUEST, "аналитик данных, python developer"))
-    await bot.handle_update(callback(GUEST, "ob:go:2"))
-    await bot.handle_update(callback(GUEST, "ob:lvl:junior"))
-    await bot.handle_update(callback(GUEST, "ob:go:3"))
-    await bot.handle_update(callback(GUEST, "ob:cty:BY"))
-    await bot.handle_update(callback(GUEST, "ob:cty:REMOTE"))
-    await bot.handle_update(callback(GUEST, "ob:go:4"))
-    await bot.handle_update(callback(GUEST, "ob:done"))
+    await bot.handle_update(callback(GUEST, "pq:next:directions"))
+    await bot.handle_update(callback(GUEST, "pq:level:junior"))
+    await bot.handle_update(callback(GUEST, "pq:next:work_formats"))
+    assert tg.calls[-1][1]["text"] == "Выберите хотя бы один формат"
+    await bot.handle_update(callback(GUEST, "pq:fmt:remote"))
+    await bot.handle_update(callback(GUEST, "pq:fmt:office"))
+    await bot.handle_update(callback(GUEST, "pq:next:work_formats"))
+    await bot.handle_update(callback(GUEST, "pq:reloc:yes"))
+    await bot.handle_update(callback(GUEST, "pq:rc:PL"))
+    await bot.handle_update(callback(GUEST, "pq:next:relocation_countries"))
+    await bot.handle_update(callback(GUEST, "pq:salc"))
+    await bot.handle_update(message(GUEST, "1 500 $"))
+
     user = db.get_user(GUEST)
-    # ручной ввод только добавляет: уже выбранный «python developer» не снимается
-    assert user.filters.queries == ["python developer", "qa engineer", "аналитик данных"]
-    assert user.filters.levels == ["junior"] and user.filters.countries == ["BY", "REMOTE"]
+    f, profile = user.filters, db.get_profile(GUEST)
     assert user.onboarded
-    menu = [
-        p for m, p in tg.calls if m == "sendMessage" and "keyboard" in (p.get("reply_markup") or {})
-    ]
-    assert menu and "Готово" in tg.texts(GUEST)[-1]
+    # ручной ввод только добавляет: уже выбранный «python developer» не снимается
+    assert f.queries == ["python developer", "аналитик данных"]
+    assert f.levels == ["intern", "junior"]
+    assert f.countries == ["BY", "PL", "REMOTE"] and not f.remote_only
+    assert f.min_salary_usd == 1200  # 80% от ожиданий
+    assert profile.relocation and profile.relocation_countries == ["PL"]
+    assert "Готово" in tg.texts(GUEST)[-1]
 
 
-async def test_resume_during_onboarding_finishes_it(db, tg):
+async def test_resume_onboarding_asks_only_missing(db, tg):
     bot = make_bot(db, tg, access_mode="open")
+
+    async def fake_ai(user, resume):
+        profile = db.get_profile(user.id)
+        profile.merge_extracted(
+            {
+                "level": "junior",
+                "skills": ["python", "fastapi"],
+                "city": "Минск",
+                "country": "BY",
+                "work_formats": ["remote", "office"],
+                "relocation": False,
+                "directions": ["python developer", "backend developer"],
+            }
+        )
+        db.save_profile(user.id, profile)
+        return "✅ Резюме разобрано"
+
+    bot.on_resume = fake_ai
     await bot.handle_update(message(GUEST, "/start"))
-    await bot.handle_update(callback(GUEST, "ob:dir:py"))
-    await bot.handle_update(callback(GUEST, "ob:go:4"))
     tg.files["f1"] = ("Python developer: FastAPI, PostgreSQL, Docker, Git. " * 3).encode()
     await bot.handle_update(document(GUEST, "f1", "cv.txt"))
-    assert db.get_user(GUEST).onboarded and len(db.get_resumes(GUEST)) == 1
+    texts = tg.texts(GUEST)
+    assert any("Вот что я понял" in t for t in texts)
+    assert "Сколько хотите получать" in texts[-1]  # всё остальное есть в резюме
+    await bot.handle_update(callback(GUEST, "pq:sal:0"))
+    user = db.get_user(GUEST)
+    assert user.onboarded
+    assert user.filters.queries == ["python developer", "backend developer"]
+    assert user.filters.countries == ["BY", "REMOTE"] and user.filters.min_salary_usd == 0
+
+
+async def test_profile_edit_updates_search(bot, tg, db):
+    onboarded_user(db, ADMIN, queries=["python developer"])
+    await bot.handle_update(message(ADMIN, r.BTN_PROFILE))
+    assert "Профиль" in tg.texts(ADMIN)[-1]
+    assert any(b.get("callback_data") == "pe:fill_missing" for b in buttons(tg))
+    await bot.handle_update(callback(ADMIN, "pe:level"))
+    await bot.handle_update(callback(ADMIN, "pq:level:middle"))
+    assert db.get_user(ADMIN).filters.levels == ["junior", "middle"]
+    assert "Профиль" in shown(tg)  # вернулись к карточке
+    await bot.handle_update(callback(ADMIN, "pe:skills"))
+    await bot.handle_update(message(ADMIN, "python, sql"))
+    assert db.get_profile(ADMIN).skills == ["python", "sql"]
+    assert db.get_user(ADMIN).filters.skills == ["python", "sql"]
+
+
+async def test_resume_without_ai_goes_to_questions(db, tg):
+    bot = make_bot(db, tg, access_mode="open")
+    await bot.handle_update(message(GUEST, "/start"))
+    tg.files["f1"] = ("Python developer: FastAPI, PostgreSQL, Docker, Git. " * 3).encode()
+    await bot.handle_update(document(GUEST, "f1", "cv.txt"))
+    assert len(db.get_resumes(GUEST)) == 1
+    assert "Что ищем?" in tg.texts(GUEST)[-1]
 
 
 # --- меню и фильтры -------------------------------------------------------------
@@ -208,6 +271,8 @@ async def test_menu_buttons(bot, tg, db):
     assert "Фильтры" in tg.texts(GUEST)[-1]
     await bot.handle_update(message(GUEST, r.BTN_STATS))
     assert "Статистика" in tg.texts(GUEST)[-1]
+    await bot.handle_update(message(GUEST, r.BTN_PROFILE))
+    assert "Профиль" in tg.texts(GUEST)[-1]
     await bot.handle_update(message(GUEST, r.BTN_HELP))
     assert "Как это работает" in tg.texts(GUEST)[-1]
     await bot.handle_update(message(GUEST, "непонятное"))
@@ -341,7 +406,7 @@ async def test_text_resume_flow_with_hook(bot, tg, db):
     await bot.handle_update(message(ADMIN, resume))
     (stored,) = db.get_resumes(ADMIN)
     assert stored.text == resume.strip() and stored.title == "Резюме 1"
-    assert received[0].id == stored.id and tg.texts(ADMIN)[-1] == "профиль готов"
+    assert received[0].id == stored.id and "профиль готов" in tg.texts(ADMIN)
 
 
 async def test_documents_become_resumes_and_can_be_deleted(bot, tg, db):
