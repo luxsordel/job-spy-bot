@@ -108,3 +108,18 @@ async def test_nofluffjobs_dedupes_and_normalizes(settings):
     http = make_http(json_handler("nofluffjobs_posting.json"))
     text = await NoFluffJobs(http, settings).fetch_description(lead)
     assert text == "We build data apps.\n\nОбязательно: Python, SQL\n\n• 5+ years"
+
+
+async def test_work_formats_from_sources(settings):
+    http = make_http(json_handler("justjoin_search.json"))
+    (jj,) = await JustJoin(http, settings).search("python")
+    assert jj.work_formats == ("remote",)
+    http = make_http(json_handler("nofluffjobs_search.json"))
+    lead, junior = await NoFluffJobs(http, settings).search("python")
+    assert lead.work_formats == ("remote",) and junior.work_formats == ()
+    http = make_http(json_handler("superjob_search.json"))
+    (sj,) = await SuperJob(http, settings).search("python")
+    assert sj.work_formats == ("remote",)
+    http = make_http(json_handler("getmatch_search.json"))
+    (gm,) = await GetMatch(http, settings).search("python")
+    assert gm.work_formats == ("remote",)

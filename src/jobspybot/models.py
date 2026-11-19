@@ -8,6 +8,9 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+#: форматы работы: удалённо, гибрид, офис
+WORK_FORMAT_VALUES = ("remote", "hybrid", "office")
+
 
 class Level(StrEnum):
     """Нормализованный уровень опыта."""
@@ -66,6 +69,10 @@ class Vacancy:
     skills: tuple[str, ...] = field(default_factory=tuple)
     snippet: str = ""
     published_at: datetime | None = None
+    #: форматы, которые указала площадка; пусто — неизвестно
+    work_formats: tuple[str, ...] = field(default_factory=tuple)
+    #: адрес / метро, если площадка их отдаёт
+    address: str = ""
     description: str | None = None  # заполняется лениво, только для прошедших отсев
 
     @property
@@ -91,6 +98,7 @@ class Vacancy:
         data = asdict(self)
         data["level"] = self.level.value if self.level else None
         data["skills"] = list(self.skills)
+        data["work_formats"] = list(self.work_formats)
         data["published_at"] = self.published_at.isoformat() if self.published_at else None
         return data
 
@@ -99,6 +107,7 @@ class Vacancy:
         data = dict(data)
         data["level"] = Level(data["level"]) if data.get("level") else None
         data["skills"] = tuple(data.get("skills") or ())
+        data["work_formats"] = tuple(data.get("work_formats") or ())
         if data.get("published_at"):
             data["published_at"] = datetime.fromisoformat(data["published_at"])
         return cls(**data)

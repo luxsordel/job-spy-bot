@@ -63,6 +63,7 @@ class PracaBy(Source):
                     location=city,
                     country="BY",
                     remote="удал" in city.lower() or None,
+                    work_formats=("remote",) if "удал" in city.lower() else (),
                     level=_level(experience),
                     snippet=_text(card.css_first(".vacancy__search-description")),
                     published_at=parse_day_month(_text(card.css_first(".vac-small__upped-time"))),

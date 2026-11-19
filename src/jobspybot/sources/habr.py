@@ -49,6 +49,8 @@ class Habr(Source):
             location=", ".join(filter(None, locations)),
             country="RU" if locations else "",
             remote=bool(item.get("remoteWork")),
+            # Habr отмечает только удалёнку; её отсутствие не значит «офис»
+            work_formats=("remote",) if item.get("remoteWork") else (),
             salary_from=salary.get("from"),
             salary_to=salary.get("to"),
             currency=normalize_currency(salary.get("currency")),

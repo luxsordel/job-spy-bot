@@ -53,6 +53,7 @@ class GetMatch(Source):
             location=", ".join(dict.fromkeys(filter(None, cities))),
             country=country,
             remote="remote" in formats,
+            work_formats=tuple(f for f in ("remote", "hybrid", "office") if f in formats),
             salary_from=item.get("salary_display_from"),
             salary_to=item.get("salary_display_to"),
             currency=normalize_currency(item.get("salary_currency")),

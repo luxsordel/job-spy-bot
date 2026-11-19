@@ -5,29 +5,78 @@
       "id": "101",
       "name": "Junior Python Developer",
       "alternate_url": "https://rabota.by/vacancy/101",
-      "area": {"id": "1002", "name": "Минск"},
-      "salary": {"from": 1500, "to": 2500, "currency": "BYR", "gross": false},
-      "employer": {"name": "ООО Пример"},
+      "area": {
+        "id": "1002",
+        "name": "Минск"
+      },
+      "salary": {
+        "from": 1500,
+        "to": 2500,
+        "currency": "BYR",
+        "gross": false
+      },
+      "employer": {
+        "name": "ООО Пример"
+      },
       "snippet": {
         "requirement": "Знание <highlighttext>Python</highlighttext>, SQL",
         "responsibility": "Разработка сервисов"
       },
-      "experience": {"id": "noExperience"},
-      "schedule": {"id": "fullDay"},
-      "work_format": [{"id": "REMOTE"}],
-      "published_at": "2026-11-19T12:00:00+0300"
+      "experience": {
+        "id": "noExperience"
+      },
+      "schedule": {
+        "id": "fullDay"
+      },
+      "work_format": [
+        {
+          "id": "REMOTE"
+        },
+        {
+          "id": "HYBRID"
+        }
+      ],
+      "published_at": "2026-11-19T12:00:00+0300",
+      "address": {
+        "raw": "Минск, улица Притыцкого, 29",
+        "metro_stations": [
+          {
+            "station_name": "Спортивная"
+          },
+          {
+            "station_name": "Пушкинская"
+          }
+        ]
+      }
     },
     {
       "id": "102",
       "name": "Senior Java Engineer",
       "alternate_url": "https://rabota.by/vacancy/102",
-      "area": {"id": "1002", "name": "Минск"},
+      "area": {
+        "id": "1002",
+        "name": "Минск"
+      },
       "salary": null,
-      "employer": {"name": "Big Corp"},
-      "snippet": {"requirement": null, "responsibility": null},
-      "experience": {"id": "moreThan6"},
-      "schedule": {"id": "fullDay"},
-      "published_at": "2026-11-18T09:00:00+0300"
+      "employer": {
+        "name": "Big Corp"
+      },
+      "snippet": {
+        "requirement": null,
+        "responsibility": null
+      },
+      "experience": {
+        "id": "moreThan6"
+      },
+      "schedule": {
+        "id": "fullDay"
+      },
+      "published_at": "2026-11-18T09:00:00+0300",
+      "work_format": [
+        {
+          "id": "ON_SITE"
+        }
+      ]
     }
   ]
 }
