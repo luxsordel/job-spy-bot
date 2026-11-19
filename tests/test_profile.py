@@ -189,3 +189,15 @@ def test_manual_filter_edit_survives_profile_changes():
     p.salary_usd = 2000
     apply_to_filters(p, f, max_queries=3)
     assert f.min_salary_usd == 1600
+
+
+def test_patch_experience_years():
+    p = UserProfile(experience_years=0.2, levels=["junior"])
+    f = UserFilters(queries=["python developer"])
+    lines = apply_patch(p, f, {"experience_years": "1"}, max_queries=3)
+    assert p.experience_years == 1.0 and lines == ["опыт: 1 год"]
+    assert p.levels == ["junior"]
+    assert apply_patch(p, f, {"experience_years": 2.5}, max_queries=3) == ["опыт: 2.5 года"]
+    for bad in (-1, 100, "много", True, None):
+        assert apply_patch(p, f, {"experience_years": bad}, max_queries=3) == []
+    assert p.experience_years == 2.5

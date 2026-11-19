@@ -81,11 +81,13 @@ PROFILE_EDIT_SYSTEM = """Пользователь бота поиска рабо
 "strict_format": true/false, "city": "город", \
 "levels": ["полный новый список грейдов вакансий из intern junior middle senior lead"], \
 "relocation": true/false, "relocation_countries": ["ISO-коды из BY RU KZ GE PL"], \
-"salary_usd": число в $ в месяц, "wishes": "район, метро, график и прочее, что не влезло в поля", \
+"salary_usd": число в $ в месяц, "experience_years": лет опыта числом, \
+"wishes": "район, метро, график и прочее, что не влезло в поля", \
 "directions_add": ["поисковые запросы"], "directions_remove": ["запросы"], \
 "exclude_add": ["стоп-слова"], "unclear": "что непонятно, если просьба неясна"}
 «Только гибрид» → work_formats ["hybrid"]. Район или метро → wishes и only_home_city: true.
 «Ещё и мидл» → levels: текущие грейды + middle; «без стажировок» → levels без intern.
+«Опыт год», «у меня 2 года опыта» → experience_years; грейды при этом не меняй.
 Текущий профиль: """
 
 LETTER_SYSTEM = """Напиши сопроводительное письмо к вакансии от лица кандидата, на языке \
@@ -447,6 +449,7 @@ class AIService:
                 "levels": profile.target_levels(),
                 "relocation": profile.relocation,
                 "salary_usd": profile.salary_usd,
+                "experience_years": profile.experience_years,
                 "wishes": profile.wishes,
                 "directions": user.filters.queries,
             },
