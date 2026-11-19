@@ -36,7 +36,7 @@ def make_http(handler: Handler) -> Http:
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(hh_app_token="test-token", superjob_api_key="sj-key")
+    return Settings(superjob_api_key="sj-key")
 
 
 @pytest.fixture

@@ -98,7 +98,6 @@ class Settings:
     poll_interval_min: int = 30
     max_vacancy_age_days: int = 7
     enabled_sources: frozenset[str] = frozenset()  # пусто = все
-    hh_app_token: str = ""
     superjob_api_key: str = ""
     http_timeout: float = 20.0
     user_agent: str = USER_AGENT
@@ -120,7 +119,6 @@ class Settings:
             poll_interval_min=_int(env, "POLL_INTERVAL_MIN", 30),
             max_vacancy_age_days=_int(env, "MAX_VACANCY_AGE_DAYS", 7),
             enabled_sources=frozenset(s.lower() for s in _csv(env, "ENABLED_SOURCES")),
-            hh_app_token=env.get("HH_APP_TOKEN", "").strip(),
             superjob_api_key=env.get("SUPERJOB_API_KEY", "").strip(),
             log_level=(env.get("LOG_LEVEL", "").strip() or "INFO").upper(),
             billing=BillingSettings(
