@@ -80,6 +80,13 @@ class UserFilters:
     only_home_city: bool = False
     home_city: str = ""
     home_country: str = ""
+    #: когда присылать: instant — сразу, digest — раз в день в digest_hour (местное время)
+    notify_mode: str = "instant"
+    digest_hour: int = 9
+    #: не присылать с 23:00 до 08:00 по местному времени, копить до утра
+    quiet_hours: bool = False
+    #: часовой пояс (часы от UTC); None — по стране проживания
+    utc_offset: int | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -95,6 +102,14 @@ class UserFilters:
         f.min_salary_usd = safe_salary(f.min_salary_usd) or 0
         if not isinstance(f.ai_threshold, int) or not 0 <= f.ai_threshold <= 100:
             f.ai_threshold = 60
+        if f.notify_mode not in ("instant", "digest"):
+            f.notify_mode = "instant"
+        if not isinstance(f.digest_hour, int) or not 0 <= f.digest_hour <= 23:
+            f.digest_hour = 9
+        if f.utc_offset is not None and (
+            not isinstance(f.utc_offset, int) or not -12 <= f.utc_offset <= 14
+        ):
+            f.utc_offset = None
         return f
 
 

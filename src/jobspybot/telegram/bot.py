@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from html import escape
 from typing import Any
 
+from jobspybot import notify
 from jobspybot.billing import PRO, SUBSCRIPTION_PERIOD_SECONDS, Billing
 from jobspybot.config import Settings
 from jobspybot.db import Database, Resume, User, utcnow
@@ -944,8 +945,73 @@ class Bot:
                 button("🔎 Площадки", data="f:src"),
                 button(f"🤖 Порог ИИ: {f.ai_threshold}", data="f:thr"),
             ],
+            [button(f"🔔 Присылать: {notify.describe(f)}", data="nt:show")],
         ]
         return "<b>⚙️ Фильтры</b>\nЧто настроить?", inline_keyboard(*rows)
+
+    def _notify_view(self, user: User) -> tuple[str, dict[str, Any]]:
+        f = user.filters
+        offset = notify.utc_offset(f)
+        local = notify.local_time(f).strftime("%H:%M")
+        text = (
+            "<b>🔔 Когда присылать вакансии</b>\n\n"
+            "⚡ <b>Сразу</b> — как только нашлась.\n"
+            f"📬 <b>Раз в день</b> — {notify.DIGEST_SIZE} лучших за сутки одним сообщением.\n"
+            f"🌙 <b>Тихие часы</b> — с {notify.QUIET_FROM}:00 до {notify.QUIET_TO:02d}:00 "
+            "не беспокою, присылаю утром.\n\n"
+            f"Часовой пояс: UTC{offset:+d} (у вас сейчас {local})."
+        )
+
+        def mark(on: bool, label: str) -> str:
+            return f"✅ {label}" if on else label
+
+        digest = f.notify_mode == notify.DIGEST
+        rows = [
+            [
+                button(mark(not digest, "⚡ Сразу"), data="nt:mode:instant"),
+                button(mark(digest, "📬 Раз в день"), data="nt:mode:digest"),
+            ]
+        ]
+        if digest:
+            rows.append(
+                [
+                    button(mark(f.digest_hour == h, f"{h}:00"), data=f"nt:hour:{h}")
+                    for h in notify.DIGEST_HOURS
+                ]
+            )
+        rows.append([button(mark(f.quiet_hours, "🌙 Тихие часы ночью"), data="nt:quiet")])
+        rows.append(
+            [button(mark(offset == o, f"UTC{o:+d}"), data=f"nt:tz:{o}") for o in notify.UTC_OFFSETS]
+        )
+        rows.append([button("⬅️ Назад", data="f:menu")])
+        return text, inline_keyboard(*rows)
+
+    async def _cb_notify(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        action, _, arg = value.partition(":")
+        f = user.filters
+        note = None
+        if action == "mode" and arg in (notify.INSTANT, notify.DIGEST):
+            f.notify_mode = arg
+            if arg == notify.DIGEST:
+                note = f"Пришлю {notify.DIGEST_SIZE} лучших в {f.digest_hour}:00"
+        elif action == "hour" and parse_int(arg) in notify.DIGEST_HOURS:
+            f.digest_hour = parse_int(arg) or notify.DIGEST_HOURS[0]
+        elif action == "quiet":
+            f.quiet_hours = not f.quiet_hours
+            note = "Ночью не беспокою" if f.quiet_hours else "Присылаю и ночью"
+        elif action == "tz" and parse_int(arg) in notify.UTC_OFFSETS:
+            f.utc_offset = parse_int(arg)
+        if action != "show":
+            self.db.save_filters(user.id, f)
+        await self.api.answer_callback(cb["id"], note)
+        text, markup = self._notify_view(user)
+        if msg:
+            await self.edit(msg, text, markup)
+        else:
+            await self.reply(user, text, markup)
+
+    async def send_digest(self, user: User, text: str) -> None:
+        await self.api.send_message(user.id, text)
 
     async def show_filters(self, user: User) -> None:
         text, markup = self._filters_menu(user)
@@ -1623,6 +1689,7 @@ class Bot:
             "sub": self._cb_subscription,
             "src": self._cb_sources_legacy,
             "del": self._cb_delete_data,
+            "nt": self._cb_notify,
             "back": self._cb_comeback,
         }.get(prefix)
         if handler:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections import defaultdict
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from jobspybot import notify
 from jobspybot.ai.service import Analysis
 from jobspybot.billing import Billing
 from jobspybot.config import Settings
@@ -24,6 +26,8 @@ log = logging.getLogger(__name__)
 
 #: не больше стольких вакансий одному пользователю за цикл — защита от флуда
 MAX_SEND_PER_CYCLE = 15
+#: сколько отложенных за ночь вакансий присылать утром за один раз (остальные — позже)
+MAX_FLUSH = 20
 UNAVAILABLE_BACKOFF = 6 * 3600
 ERROR_BACKOFF = 30 * 60
 
@@ -49,6 +53,7 @@ class CycleStats:
     ai_calls: int = 0
     ai_rejected: int = 0
     ai_deferred: int = 0
+    queued: int = 0
     errors: dict[str, str] = field(default_factory=dict)
 
 
@@ -89,6 +94,8 @@ class Pipeline:
         self.on_alert: Alert | None = None
         self.last_cycle: CycleStats | None = None
         self.last_cycle_at: datetime | None = None
+        #: текущее время (подменяется в тестах тихих часов и дайджеста)
+        self.clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     async def describe(self, vacancy: Vacancy) -> str:
         """Полное описание (с кэшем в БД). Запрашивается только для прошедших отсев."""
@@ -257,7 +264,23 @@ class Pipeline:
 
     # --- рассылка ------------------------------------------------------------
 
-    async def deliver(self, user: User, vacancy: Vacancy, score: int, extra: str = "") -> bool:
+    async def deliver(
+        self,
+        user: User,
+        vacancy: Vacancy,
+        score: int,
+        extra: str = "",
+        ai_score: int | None = None,
+        stats: CycleStats | None = None,
+    ) -> bool:
+        if notify.hold(user.filters, self.clock()):
+            # тихие часы или дайджест: отложить; оценка ИИ хранится в reason
+            self.db.record(
+                user.id, vacancy, "queued", extra, ai_score if ai_score is not None else score
+            )
+            if stats is not None:
+                stats.queued += 1
+            return False
         self.db.record(user.id, vacancy, "pending", score=score)
         delivery_id = self.db.delivery_id(user.id, vacancy.uid)
         assert delivery_id is not None
@@ -288,6 +311,7 @@ class Pipeline:
             candidates = candidates[: self.settings.ai.max_per_cycle]
         for score, vacancy, fit in candidates:
             extra = ""
+            ai_score: int | None = None
             if use_ai:
                 assert self.evaluator is not None
                 analysis = await self.evaluator.evaluate(user, vacancy)
@@ -305,8 +329,74 @@ class Pipeline:
                         stats.ai_rejected += 1
                         continue
                     extra = analysis.render()
-            if await self.deliver(user, vacancy, score, extra):
+                    ai_score = analysis.score
+            if await self.deliver(user, vacancy, score, extra, ai_score, stats):
                 stats.sent += 1
+
+    # --- отложенные: тихие часы и дайджест ------------------------------------
+
+    async def flush(self) -> int:
+        """Отправить отложенное, если уже можно. Возвращает число отправленных вакансий."""
+        now = self.clock()
+        sent = 0
+        for uid in self.db.users_with_queue():
+            user = self.db.get_user(uid)
+            if user is None or not user.allowed or user.banned or user.paused:
+                continue
+            try:
+                sent += await self._flush_user(user, now)
+            except Exception:
+                log.exception("flush for user %s failed", uid)
+        return sent
+
+    async def _flush_user(self, user: User, now: datetime) -> int:
+        f = user.filters
+        if f.notify_mode == notify.DIGEST:
+            if not notify.digest_due(f, now) or self.db.count_today(user.id, "digest"):
+                return 0
+            return await self._send_digest(user)
+        if notify.in_quiet_hours(f, now):
+            return 0
+        sent = 0
+        for delivery_id, vacancy, extra, _ in self.db.queued(user.id)[:MAX_FLUSH]:
+            try:
+                await self.notifier.send_vacancy(user, vacancy, delivery_id, extra)
+            except Exception as exc:
+                log.warning("send queued to %s failed: %r", user.id, exc)
+                self.db.set_status(user.id, delivery_id, "error")
+                continue
+            self.db.set_status(user.id, delivery_id, "sent")
+            sent += 1
+        return sent
+
+    async def _send_digest(self, user: User) -> int:
+        queued = self.db.queued(user.id)
+        if not queued:
+            return 0
+        # лучшие по оценке ИИ (без неё — по локальному баллу); с оценкой ИИ — выше
+        queued.sort(key=lambda q: (bool(q[2]), q[3] or 0), reverse=True)
+        top = queued[: notify.DIGEST_SIZE]
+        text, count = notify.digest_text(
+            [(v, score if extra else None) for _, v, extra, score in top], len(queued)
+        )
+        send = getattr(self.notifier, "send_digest", None)
+        if send is None:
+            return 0
+        await send(user, text)
+        self.db.bump(user.id, "digest")
+        for i, (delivery_id, *_rest) in enumerate(queued):
+            self.db.set_status(user.id, delivery_id, "sent" if i < count else "skipped")
+        return count
+
+    async def flush_forever(self, stop: asyncio.Event, every: float = 300) -> None:
+        """Каждые 5 минут: не закончились ли тихие часы, не пора ли дайджест."""
+        while not stop.is_set():
+            try:
+                await self.flush()
+            except Exception:
+                log.exception("flush failed")
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=every)
 
     async def run_cycle(self) -> CycleStats:
         stats = CycleStats()
@@ -327,7 +417,7 @@ class Pipeline:
             self.db.set_last_check(user.id)
         log.info(
             "cycle: fetched=%d new=%d filtered=%d ai=%d ai_rejected=%d ai_deferred=%d sent=%d"
-            " errors=%s",
+            " queued=%d errors=%s",
             stats.fetched,
             stats.new,
             stats.filtered,
@@ -335,6 +425,7 @@ class Pipeline:
             stats.ai_rejected,
             stats.ai_deferred,
             stats.sent,
+            stats.queued,
             list(stats.errors),
         )
         self.last_cycle, self.last_cycle_at = stats, datetime.now(UTC)
