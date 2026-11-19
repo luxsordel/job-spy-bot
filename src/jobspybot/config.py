@@ -39,13 +39,77 @@ def parse_dotenv(text: str) -> dict[str, str]:
     return result
 
 
-def load_env(path: str | os.PathLike[str] | None = ".env") -> dict[str, str]:
-    """Значения из `.env`, поверх которых накладываются реальные переменные окружения."""
+def load_env(
+    path: str | os.PathLike[str] | None = ".env",
+    overrides: str | os.PathLike[str] | None = None,
+) -> dict[str, str]:
+    """Значения из `.env`, затем правки из веб-админки, затем реальные переменные окружения."""
     env: dict[str, str] = {}
-    if path and Path(path).is_file():
-        env.update(parse_dotenv(Path(path).read_text(encoding="utf-8")))
+    for file in (path, overrides):
+        if file and Path(file).is_file():
+            env.update(parse_dotenv(Path(file).read_text(encoding="utf-8")))
     env.update(os.environ)
     return env
+
+
+#: файл с правками настроек из веб-админки — рядом с базой, где у сервиса есть право записи
+#: (на VPS /etc только для чтения из-за песочницы systemd)
+OVERRIDES_FILE = "settings.env"
+
+
+def overrides_path(env: Mapping[str, str]) -> Path:
+    db_path = Path(env.get("DB_PATH", "").strip() or "data/jobspy.sqlite3")
+    return db_path.parent / OVERRIDES_FILE
+
+
+#: что можно менять из веб-админки. Токены Telegram и самой админки, адрес, порт, база
+#: и список админов — только в .env: ошибка в них отрезает доступ к боту.
+EDITABLE_KEYS = (
+    "ACCESS_MODE",
+    "TRIAL_DAYS",
+    "PRO_PRICE_STARS",
+    "SUPPORT_CONTACT",
+    "POLL_INTERVAL_MIN",
+    "MAX_VACANCY_AGE_DAYS",
+    "ENABLED_SOURCES",
+    "LOG_LEVEL",
+    "SUPERJOB_API_KEY",
+    "AI_BASE_URL",
+    "AI_API_KEY",
+    "AI_MODEL",
+    "AI_DAILY_TOKENS_PER_USER",
+    "AI_MAX_DESCRIPTION_CHARS",
+    "AI_MAX_PER_CYCLE",
+    "RATE_LIMIT_PER_MIN",
+    "MAX_UPLOADS_PER_DAY",
+    "DELETE_INACTIVE_DAYS",
+    "ALERT_COOLDOWN_MIN",
+    "SOURCE_SILENCE_HOURS",
+)
+#: значения не показываются, только «задано / не задано»
+SECRET_KEYS = frozenset({"SUPERJOB_API_KEY", "AI_API_KEY"})
+
+
+def save_overrides(path: Path, changes: Mapping[str, str]) -> dict[str, str]:
+    """Дописывает правки в файл переопределений. Пустое значение — убрать правку."""
+    current = parse_dotenv(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    for key, value in changes.items():
+        if key not in EDITABLE_KEYS:
+            raise ConfigError(f"{key} нельзя менять из админки")
+        value = value.strip()
+        if any(ch in value for ch in '\r\n"') or len(value) > 500:
+            raise ConfigError(f"{key}: недопустимое значение")
+        if value:
+            current[key] = value
+        else:
+            current.pop(key, None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "# Правки из веб-админки. Перекрывают .env, но не переменные окружения.\n"
+    body += "".join(f'{k}="{v}"\n' for k, v in sorted(current.items()))
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    tmp.replace(path)
+    return current
 
 
 def _int(env: Mapping[str, str], key: str, default: int) -> int:

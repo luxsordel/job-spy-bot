@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 
-from jobspybot.config import ConfigError, Settings, load_env
+from jobspybot.config import ConfigError, Settings, load_env, overrides_path
 from jobspybot.http import Http
 from jobspybot.sources import REGISTRY, SourceUnavailable, build_sources
 
@@ -52,7 +53,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     try:
-        settings = Settings.from_env(load_env(args.env))
+        base = load_env(args.env)
+        overrides = overrides_path(base)
+        env = load_env(args.env, overrides)
+        settings = Settings.from_env(env)
     except ConfigError as exc:
         sys.exit(f"Ошибка конфигурации: {exc}")
 
@@ -65,14 +69,25 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "check-sources":
         sys.exit(asyncio.run(check_sources(settings, args.query)))
 
+    from jobspybot.admin_web import Runtime
     from jobspybot.app import run
+    from jobspybot.guard import LogBuffer
 
+    logs = LogBuffer()
+    logging.getLogger().addHandler(logs)
+    runtime = Runtime(env=env, overrides=overrides, logs=logs)
     try:
-        asyncio.run(run(settings))
+        restart = asyncio.run(run(settings, runtime))
     except ConfigError as exc:
         sys.exit(f"Ошибка конфигурации: {exc}")
     except KeyboardInterrupt:
-        pass
+        return
+    if restart:
+        # перезапуск из админки: тот же процесс с теми же аргументами, новые настройки
+        # прочитаются заново (под systemd PID сохраняется, сервис не считается упавшим)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
 
 
 if __name__ == "__main__":

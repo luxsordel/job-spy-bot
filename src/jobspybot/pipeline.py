@@ -17,6 +17,7 @@ from jobspybot.config import Settings
 from jobspybot.db import Database, User
 from jobspybot.filters import check, local_score
 from jobspybot.models import Vacancy
+from jobspybot.relevance import Fit, mismatch_reason, role_fit, user_families
 from jobspybot.sources import Source, SourceUnavailable
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class CycleStats:
     filtered: int = 0
     ai_calls: int = 0
     ai_rejected: int = 0
+    ai_deferred: int = 0
     errors: dict[str, str] = field(default_factory=dict)
 
 
@@ -191,10 +193,21 @@ class Pipeline:
 
     # --- отбор ---------------------------------------------------------------
 
+    def wanted_roles(self, user: User) -> frozenset[str]:
+        """Семейства ролей, которые ищет человек (по направлениям и навыкам)."""
+        skills = list(user.filters.skills)
+        for resume in self.db.get_resumes(user.id):
+            skills += resume.skills
+        return user_families(self.queries(user), skills)
+
     def candidates(
         self, user: User, found: dict[tuple[str, str], list[Vacancy]], stats: CycleStats
-    ) -> list[tuple[int, Vacancy]]:
-        """Прошедшие первичный отсев вакансии с локальным баллом, лучшие — первыми."""
+    ) -> list[tuple[int, Vacancy, Fit]]:
+        """Прошедшие первичный отсев вакансии с локальным баллом, лучшие — первыми.
+
+        Вакансии другой профессии (бизнес-аналитик для вайбкодера) отсеиваются здесь же:
+        площадки ищут по тексту и отдают всё, где слово просто встретилось.
+        """
         f = user.filters
         names = set(f.sources or self.sources)
         queries = {q.strip().lower() for q in self.queries(user)}
@@ -210,13 +223,17 @@ class Pipeline:
         if f.skills:
             skill_sets.append(f.skills)
 
-        passed: list[tuple[int, Vacancy]] = []
+        wanted = self.wanted_roles(user)
+        passed: list[tuple[int, Vacancy, Fit]] = []
         seen_fp: set[str] = set()
         for v in pool.values():
             if v.fingerprint in seen_fp or self.db.is_known(user.id, v):
                 continue
             seen_fp.add(v.fingerprint)
             reason = check(v, f, max_age_days=self.settings.max_vacancy_age_days)
+            fit = role_fit(v.title, wanted)
+            if reason is None and fit is Fit.MISMATCH:
+                reason = mismatch_reason(v.title)
             score = max((local_score(v, s) for s in skill_sets), default=local_score(v, []))
             if reason is None and skill_sets and score < f.min_local_score:
                 reason = f"мало совпадений навыков ({score})"
@@ -224,10 +241,15 @@ class Pipeline:
                 self.db.record(user.id, v, "filtered", reason, score)
                 stats.filtered += 1
                 continue
-            passed.append((score, v))
+            passed.append((score, v, fit))
 
+        # явное совпадение роли — первым, потом по навыкам и свежести
         passed.sort(
-            key=lambda sv: (sv[0], sv[1].published_at.timestamp() if sv[1].published_at else 0),
+            key=lambda c: (
+                c[2] is Fit.MATCH,
+                c[0],
+                c[1].published_at.timestamp() if c[1].published_at else 0,
+            ),
             reverse=True,
         )
         # остальные не записываются — дойдут в следующих циклах
@@ -264,11 +286,16 @@ class Pipeline:
         if use_ai:
             # дорогой этап — только лучшие по локальному баллу, остальные подождут
             candidates = candidates[: self.settings.ai.max_per_cycle]
-        for score, vacancy in candidates:
+        for score, vacancy, fit in candidates:
             extra = ""
             if use_ai:
                 assert self.evaluator is not None
                 analysis = await self.evaluator.evaluate(user, vacancy)
+                if analysis is None and fit is not Fit.MATCH:
+                    # ИИ не смог оценить (кончился дневной лимит, сбой провайдера), а по
+                    # названию роль не ясна — не шлём наугад, вакансия подождёт следующего цикла
+                    stats.ai_deferred += 1
+                    continue
                 if analysis is not None:
                     stats.ai_calls += 1
                     if analysis.score < user.filters.ai_threshold or analysis.by == "no":
@@ -299,12 +326,14 @@ class Pipeline:
                 log.exception("processing user %s failed", user.id)
             self.db.set_last_check(user.id)
         log.info(
-            "cycle: fetched=%d new=%d filtered=%d ai=%d ai_rejected=%d sent=%d errors=%s",
+            "cycle: fetched=%d new=%d filtered=%d ai=%d ai_rejected=%d ai_deferred=%d sent=%d"
+            " errors=%s",
             stats.fetched,
             stats.new,
             stats.filtered,
             stats.ai_calls,
             stats.ai_rejected,
+            stats.ai_deferred,
             stats.sent,
             list(stats.errors),
         )
