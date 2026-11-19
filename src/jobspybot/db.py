@@ -49,6 +49,22 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS ix_deliveries_fp ON deliveries(user_id, fingerprint);
 
+-- оценка вакансии ИИ для конкретного профиля (одна вакансия — один запрос к модели)
+CREATE TABLE IF NOT EXISTS ai_cache (
+    vacancy_uid   TEXT NOT NULL,
+    profile_hash  TEXT NOT NULL,
+    result        TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (vacancy_uid, profile_hash)
+);
+
+CREATE TABLE IF NOT EXISTS ai_usage (
+    user_id  INTEGER NOT NULL,
+    day      TEXT NOT NULL,
+    tokens   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day)
+);
+
 CREATE TABLE IF NOT EXISTS invites (
     code        TEXT PRIMARY KEY,
     created_by  INTEGER NOT NULL,
@@ -138,6 +154,8 @@ class Database:
 
     def purge_old(self, days: int = 30) -> int:
         cutoff = (utcnow() - timedelta(days=days)).isoformat()
+        self.conn.execute("DELETE FROM ai_cache WHERE created_at < ?", (cutoff,))
+        self.conn.execute("DELETE FROM ai_usage WHERE day < ?", (cutoff[:10],))
         self.conn.execute("DELETE FROM deliveries WHERE created_at < ?", (cutoff,))
         return self.conn.execute("DELETE FROM vacancies WHERE first_seen < ?", (cutoff,)).rowcount
 
@@ -269,3 +287,33 @@ class Database:
             (user_id, since),
         )
         return {r["status"]: r["n"] for r in rows}
+
+    # --- ИИ -------------------------------------------------------------------
+
+    def get_ai_cache(self, vacancy_uid: str, profile_hash: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT result FROM ai_cache WHERE vacancy_uid = ? AND profile_hash = ?",
+            (vacancy_uid, profile_hash),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_ai_cache(self, vacancy_uid: str, profile_hash: str, result: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ai_cache(vacancy_uid, profile_hash, result, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (vacancy_uid, profile_hash, result, utcnow().isoformat()),
+        )
+
+    def add_tokens(self, user_id: int, tokens: int) -> None:
+        self.conn.execute(
+            "INSERT INTO ai_usage(user_id, day, tokens) VALUES (?, ?, ?)"
+            " ON CONFLICT(user_id, day) DO UPDATE SET tokens = tokens + excluded.tokens",
+            (user_id, utcnow().date().isoformat(), tokens),
+        )
+
+    def tokens_today(self, user_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT tokens FROM ai_usage WHERE user_id = ? AND day = ?",
+            (user_id, utcnow().date().isoformat()),
+        ).fetchone()
+        return row[0] if row else 0
