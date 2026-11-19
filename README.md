@@ -196,6 +196,7 @@ journalctl -u job-spy-bot -f
 | `POST /api/restart`, `POST /api/cycle` | перезапуск бота, внеочередной цикл поиска |
 | `GET /api/users?q=`, `GET /api/user?id=ID` | пользователи; профиль, фильтры и последние вакансии с причинами отсева |
 | `POST /api/user {"id": ID, "action": "ban"}` | действия: grant, allow, deny, ban, unban, pause, unpause, message, delete |
+| `GET /api/backups`, `POST /api/backup` | список бэкапов базы, сделать бэкап сейчас |
 
 ### Защита и оповещения
 
@@ -206,6 +207,13 @@ journalctl -u job-spy-bot -f
   в `ALERT_COOLDOWN_MIN`).
 - Данные тех, кто не заходил `DELETE_INACTIVE_DAYS` дней и не платит, удаляются
   автоматически (см. `/privacy`).
+
+### Бэкапы
+
+Каждый день в `BACKUP_HOUR_UTC`:00 бот делает согласованную копию базы (SQLite backup API —
+безопасно при работающем боте), сжимает её и хранит `BACKUP_KEEP` последних в
+`/var/lib/job-spy-bot/backups`. Свежая копия приходит админам файлом в Telegram — это
+копия вне сервера. Восстановление — [docs/backup.md](docs/backup.md).
 
 ## Разработка
 

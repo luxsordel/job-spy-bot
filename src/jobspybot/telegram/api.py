@@ -57,7 +57,7 @@ class TelegramAPI:
             "getUpdates",
             offset=offset,
             timeout=timeout,
-            allowed_updates=["message", "callback_query", "pre_checkout_query"],
+            allowed_updates=["message", "callback_query", "pre_checkout_query", "my_chat_member"],
         )
 
     async def send_message(
@@ -87,6 +87,28 @@ class TelegramAPI:
             caption=caption[:1024] or None,
             parse_mode=parse_mode if caption else None,
         )
+
+    async def upload_document(
+        self, chat_id: int, filename: str, data: bytes, caption: str = ""
+    ) -> dict[str, Any]:
+        """Отправка файла с диска (бэкап базы) — multipart, не file_id."""
+        form = {"chat_id": str(chat_id)}
+        if caption:
+            form["caption"] = caption[:1024]
+        resp = await self._client.post(
+            f"{self._url}/sendDocument",
+            data=form,
+            files={"document": (filename, data, "application/gzip")},
+            timeout=httpx.Timeout(300.0),
+        )
+        result = resp.json()
+        if not result.get("ok"):
+            raise TelegramError(
+                "sendDocument",
+                result.get("error_code", resp.status_code),
+                result.get("description", ""),
+            )
+        return result["result"]
 
     async def edit_reply_markup(
         self, chat_id: int, message_id: int, reply_markup: dict[str, Any] | None
