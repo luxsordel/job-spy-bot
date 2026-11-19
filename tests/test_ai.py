@@ -146,7 +146,7 @@ async def test_evaluate_uses_cache_and_budget(db):
     # профиль в system-сообщении, вакансия — в user: префикс общий для всех вакансий
     msgs = fake.requests[0]["messages"]
     assert '"python"' in msgs[0]["content"] and "Python Dev" in msgs[1]["content"]
-    assert fake.requests[0]["max_tokens"] <= 250
+    assert fake.requests[0]["max_tokens"] <= 450
 
     await ai.evaluate(user, vac("2", "Go Dev"))
     await ai.evaluate(user, vac("3", "Rust Dev"))  # 3*360 > 1000 — лимит
@@ -199,3 +199,27 @@ async def test_cover_letter(db):
     assert "резюме" in await ai.cover_letter(user, vac("1", "X"))
     user.profile = "{}"
     assert "Django" in await ai.cover_letter(user, vac("1", "X"))
+
+
+def test_salvage_truncated_reply():
+    from jobspybot.ai.service import salvage_json
+
+    cut = '{"score": 38, "by": "no", "verdict": "Удалёнка только из РФ", "pros": ["Стек совп'
+    data = salvage_json(cut)
+    a = Analysis.from_data(data)
+    assert (a.score, a.by, a.verdict) == (38, "no", "Удалёнка только из РФ")
+    assert salvage_json('{"verdict": "без балла"') is None
+
+
+async def test_evaluate_survives_truncated_json(db):
+    class Truncating(FakeLLM):
+        def __call__(self, request):
+            resp = super().__call__(request)
+            body = resp.json()
+            body["choices"][0]["message"]["content"] = '{"score": 71, "by": "ok", "pros": ["Dja'
+            return httpx.Response(200, json=body)
+
+    ai = make_ai(db, Truncating())
+    user = db.ensure_user(1, allowed=True)
+    user.profile = "{}"
+    assert (await ai.evaluate(user, vac("1", "X"))).score == 71
