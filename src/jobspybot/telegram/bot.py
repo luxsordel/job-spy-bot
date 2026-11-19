@@ -257,6 +257,14 @@ class Bot:
             except TelegramError as exc:
                 log.warning("cannot notify admin %s: %s", admin, exc)
 
+    async def send_backup(self, filename: str, data: bytes, caption: str) -> None:
+        """Свежий бэкап базы — файлом каждому админу (копия вне сервера)."""
+        for admin in self.settings.admin_ids:
+            try:
+                await self.api.upload_document(admin, filename, data, caption)
+            except Exception as exc:
+                log.warning("cannot send backup to admin %s: %r", admin, exc)
+
     # --- входящие ------------------------------------------------------------
 
     async def handle_update(self, update: dict[str, Any]) -> None:

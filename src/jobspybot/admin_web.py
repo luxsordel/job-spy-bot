@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, quote, urlsplit
 
 from jobspybot import __version__
+from jobspybot.backup import Backups, run_and_send
 from jobspybot.billing import PRO, Billing
 from jobspybot.config import (
     EDITABLE_KEYS,
@@ -169,6 +170,9 @@ def effective_values(s: Settings) -> dict[str, str]:
         "DELETE_INACTIVE_DAYS": g.inactive_days,
         "ALERT_COOLDOWN_MIN": g.alert_cooldown_min,
         "SOURCE_SILENCE_HOURS": g.source_silence_hours,
+        "BACKUP_HOUR_UTC": s.backup.hour_utc,
+        "BACKUP_KEEP": s.backup.keep,
+        "BACKUP_TO_TELEGRAM": int(s.backup.to_telegram),
     }
     return {k: str(v) for k, v in values.items()}
 
@@ -318,6 +322,8 @@ API_ENDPOINTS = [
     "GET /api/user?id=ID",
     "POST /api/user {id, action: grant|allow|deny|ban|unban|pause|unpause|reset|message|"
     "delete, ...}",
+    "GET /api/backups",
+    "POST /api/backup",
 ]
 
 SEGMENTS = {
@@ -339,7 +345,9 @@ class AdminWeb:
         pipeline: Pipeline | None = None,
         alerts: AdminAlerts | None = None,
         runtime: Runtime | None = None,
+        backups: Backups | None = None,
     ) -> None:
+        self.backups = backups
         self.runtime = runtime or Runtime()
         self.settings = settings
         self.db = db
@@ -1098,6 +1106,14 @@ class AdminWeb:
                 return json_response({"error": "pipeline not attached"}, 409)
             stats = await self.pipeline.run_cycle()
             return json_response({"ok": True, "stats": stats.__dict__})
+        if (m, path) == ("GET", "/backups"):
+            return json_response(self._backups_json())
+        if (m, path) == ("POST", "/backup"):
+            if self.backups is None:
+                return json_response({"error": "backups disabled (BACKUP_KEEP=0)"}, 409)
+            send = self.bot.send_backup if self.bot and self.settings.backup.to_telegram else None
+            info = await run_and_send(self.backups, send)
+            return json_response({"ok": True, "file": info.path.name, "size": info.size})
         if (m, path) == ("GET", "/users"):
             users = self.db.search_users(req.query.get("q", "")[:64], limit=200)
             return json_response([self._user_json(u) for u in users])
@@ -1122,12 +1138,25 @@ class AdminWeb:
             "stats": self.db.business_stats(),
             "funnel": self.db.funnel(),
             "ai_tokens_today": self.db.tokens_since(utcnow().date().isoformat()),
+            "backups": self._backups_json(),
             "last_cycle_at": pipe.last_cycle_at if pipe else None,
             "last_cycle": pipe.last_cycle.__dict__ if pipe and pipe.last_cycle else None,
             "sources": {n: st.__dict__ for n, st in pipe.status.items()} if pipe else {},
             "alerts": [
                 {"at": a.at, "count": a.count, "text": a.text}
                 for a in (self.alerts.recent if self.alerts else [])
+            ],
+        }
+
+    def _backups_json(self) -> dict[str, Any]:
+        if self.backups is None:
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "dir": str(self.backups.directory),
+            "last_error": self.backups.last_error,
+            "copies": [
+                {"file": b.path.name, "size": b.size, "at": b.at} for b in self.backups.copies()
             ],
         }
 
