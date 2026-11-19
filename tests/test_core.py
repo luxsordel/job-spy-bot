@@ -126,3 +126,24 @@ def test_db_save_vacancies_returns_only_new(db):
     assert db.save_vacancies([v]) == set()
     db.set_description("s:1", "desc")
     assert db.get_vacancy("s:1").description == "desc"
+
+
+def test_inactive_users_are_purged(db):
+    from datetime import UTC, datetime, timedelta
+
+    from jobspybot.profile import UserProfile
+
+    for uid in (1, 2, 3, 4):
+        db.ensure_user(uid, f"u{uid}", allowed=True)
+        db.set_onboarded(uid)
+        db.add_resume(uid, "cv", "x" * 60)
+        db.save_profile(uid, UserProfile(city="Минск"))
+    old = (datetime.now(UTC) - timedelta(days=200)).isoformat()
+    db.conn.execute("UPDATE users SET last_seen = ? WHERE id IN (1, 2, 3)", (old,))
+    db.set_plan(2, datetime.now(UTC) + timedelta(days=5))  # на Pro — не трогаем
+    db.set_banned(3, True)
+    assert db.purge_inactive(180) == [1, 3]
+    assert db.get_resumes(1) == [] and db.get_profile(1).city == ""
+    assert db.get_resumes(2) and db.get_resumes(4)
+    assert db.get_user(3).banned  # бан переживает удаление данных
+    assert db.purge_inactive(180) == []  # повторно ничего не удаляется

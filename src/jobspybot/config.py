@@ -91,6 +91,35 @@ class BillingSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class GuardSettings:
+    """Защита от злоупотреблений, приватность и оповещения."""
+
+    #: сообщений и нажатий кнопок в минуту на пользователя (админы без лимита)
+    rate_limit_per_min: int = 30
+    #: загрузок файлов в сутки на пользователя
+    max_uploads_per_day: int = 10
+    #: удалять данные тех, кто не заходил столько дней (0 — не удалять)
+    inactive_days: int = 180
+    #: одинаковые ошибки админу — не чаще раза в N минут
+    alert_cooldown_min: int = 30
+    #: площадка молчит (0 вакансий) дольше N часов — сообщить админу (0 — не следить)
+    source_silence_hours: int = 12
+
+
+@dataclass(frozen=True, slots=True)
+class AdminWebSettings:
+    """Веб-админка. Включается, если задан токен и порт."""
+
+    host: str = "127.0.0.1"
+    port: int = 0
+    token: str = ""
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.port and self.token)
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     telegram_token: str = ""
     admin_ids: frozenset[int] = frozenset()
@@ -104,6 +133,8 @@ class Settings:
     log_level: str = "INFO"
     ai: AISettings = field(default_factory=AISettings)
     billing: BillingSettings = field(default_factory=BillingSettings)
+    guard: GuardSettings = field(default_factory=GuardSettings)
+    admin_web: AdminWebSettings = field(default_factory=AdminWebSettings)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -135,7 +166,26 @@ class Settings:
                 max_description_chars=_int(env, "AI_MAX_DESCRIPTION_CHARS", 2_500),
                 max_per_cycle=_int(env, "AI_MAX_PER_CYCLE", 10),
             ),
+            guard=GuardSettings(
+                rate_limit_per_min=_int(env, "RATE_LIMIT_PER_MIN", 30),
+                max_uploads_per_day=_int(env, "MAX_UPLOADS_PER_DAY", 10),
+                inactive_days=_int(env, "DELETE_INACTIVE_DAYS", 180),
+                alert_cooldown_min=_int(env, "ALERT_COOLDOWN_MIN", 30),
+                source_silence_hours=_int(env, "SOURCE_SILENCE_HOURS", 12),
+            ),
+            admin_web=AdminWebSettings(
+                host=env.get("ADMIN_WEB_HOST", "").strip() or "127.0.0.1",
+                port=_int(env, "ADMIN_WEB_PORT", 0),
+                token=env.get("ADMIN_WEB_TOKEN", "").strip(),
+            ),
         )
+        if settings.admin_web.port and len(settings.admin_web.token) < 16:
+            raise ConfigError(
+                "ADMIN_WEB_TOKEN — не короче 16 символов (сгенерировать: "
+                'python -c "import secrets; print(secrets.token_urlsafe(24))")'
+            )
+        if settings.guard.rate_limit_per_min < 5:
+            raise ConfigError("RATE_LIMIT_PER_MIN не может быть меньше 5")
         if settings.billing.access_mode not in ("invite", "open"):
             raise ConfigError("ACCESS_MODE — invite или open")
         if settings.poll_interval_min < 5:

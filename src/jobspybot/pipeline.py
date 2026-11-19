@@ -6,7 +6,9 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from jobspybot.ai.service import Analysis
@@ -48,6 +50,20 @@ class CycleStats:
     errors: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class SourceStatus:
+    """Здоровье площадки — для оповещений и веб-админки."""
+
+    checked_at: datetime | None = None
+    last_count: int = 0
+    found_at: datetime | None = None  # когда последний раз нашлась хоть одна вакансия
+    error: str = ""
+    error_at: datetime | None = None
+
+
+Alert = Callable[[str, str, float | None], object]
+
+
 class Pipeline:
     def __init__(
         self,
@@ -65,6 +81,12 @@ class Pipeline:
         self.evaluator = evaluator
         self.billing = billing
         self._backoff: dict[str, float] = {}
+        self.status: dict[str, SourceStatus] = {name: SourceStatus() for name in sources}
+        self.started_at = datetime.now(UTC)
+        #: оповещение админу: (ключ, текст, пауза между повторами в секундах)
+        self.on_alert: Alert | None = None
+        self.last_cycle: CycleStats | None = None
+        self.last_cycle_at: datetime | None = None
 
     async def describe(self, vacancy: Vacancy) -> str:
         """Полное описание (с кэшем в БД). Запрашивается только для прошедших отсев."""
@@ -105,6 +127,7 @@ class Pipeline:
         if self._backoff.get(name, 0) > time.monotonic():
             return {}
         source = self.sources[name]
+        status = self.status.setdefault(name, SourceStatus())
         result: dict[str, list[Vacancy]] = {}
         for query in sorted(queries):
             try:
@@ -119,7 +142,35 @@ class Pipeline:
                 stats.errors[name] = repr(exc)
                 self._backoff[name] = time.monotonic() + ERROR_BACKOFF
                 break
+        now = datetime.now(UTC)
+        status.checked_at = now
+        status.last_count = sum(len(v) for v in result.values())
+        if status.last_count:
+            status.found_at = now
+        if name in stats.errors:
+            status.error, status.error_at = stats.errors[name][:300], now
         return result
+
+    def check_silence(self, names: list[str], now: datetime | None = None) -> list[str]:
+        """Площадки, которые дольше `source_silence_hours` не отдают вакансий."""
+        hours = self.settings.guard.source_silence_hours
+        if not hours:
+            return []
+        now = now or datetime.now(UTC)
+        silent = []
+        for name in names:
+            status = self.status.setdefault(name, SourceStatus())
+            since = status.found_at or self.started_at
+            if now - since >= timedelta(hours=hours):
+                silent.append(name)
+                if self.on_alert:
+                    last = f"\nПоследняя ошибка: {status.error}" if status.error else ""
+                    self.on_alert(
+                        f"source:{name}",
+                        f"🔇 Площадка {name} не отдаёт вакансий больше {hours} ч.{last}",
+                        hours * 3600,
+                    )
+        return silent
 
     async def fetch(
         self, users: list[User], stats: CycleStats
@@ -240,6 +291,7 @@ class Pipeline:
         if not users:
             return stats
         found = await self.fetch(users, stats)
+        self.check_silence(sorted(self._plan(users)))
         for user in users:
             try:
                 await self.process_user(user, found, stats)
@@ -256,6 +308,7 @@ class Pipeline:
             stats.sent,
             list(stats.errors),
         )
+        self.last_cycle, self.last_cycle_at = stats, datetime.now(UTC)
         return stats
 
     async def run_forever(self, stop: asyncio.Event, first_delay: float = 10.0) -> None:

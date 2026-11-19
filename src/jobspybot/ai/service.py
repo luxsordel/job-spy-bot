@@ -69,12 +69,14 @@ EVAL_SYSTEM = """Ты оцениваешь, насколько вакансия 
 PROFILE_EDIT_SYSTEM = """Пользователь бота поиска работы пишет, что хочет изменить в поиске.
 Верни только JSON с полями, которые нужно изменить (остальные не включай):
 {"work_formats": ["remote|hybrid|office"], "only_home_city": true/false, \
-"strict_format": true/false, "city": "город", "level": "intern|junior|middle|senior|lead", \
+"strict_format": true/false, "city": "город", \
+"levels": ["полный новый список грейдов вакансий из intern junior middle senior lead"], \
 "relocation": true/false, "relocation_countries": ["ISO-коды из BY RU KZ GE PL"], \
 "salary_usd": число в $ в месяц, "wishes": "район, метро, график и прочее, что не влезло в поля", \
 "directions_add": ["поисковые запросы"], "directions_remove": ["запросы"], \
 "exclude_add": ["стоп-слова"], "unclear": "что непонятно, если просьба неясна"}
 «Только гибрид» → work_formats ["hybrid"]. Район или метро → wishes и only_home_city: true.
+«Ещё и мидл» → levels: текущие грейды + middle; «без стажировок» → levels без intern.
 Текущий профиль: """
 
 LETTER_SYSTEM = """Напиши сопроводительное письмо к вакансии от лица кандидата, на языке \
@@ -188,14 +190,34 @@ class AIService:
         self.describe: Describe | None = None
         #: дневной лимит токенов для пользователя (зависит от тарифа)
         self.token_limit: Callable[[User], int] = lambda _user: settings.daily_tokens_per_user
+        #: оповещение админу (ключ для дедупликации, текст) — подключается в app.py
+        self.on_alert: Callable[[str, str], Any] | None = None
+        self._failures = 0
 
     # --- бюджет --------------------------------------------------------------
 
     def has_budget(self, user: User) -> bool:
         return self.db.tokens_today(user.id) < self.token_limit(user)
 
+    def _provider_failed(self, exc: LLMError) -> None:
+        """Подряд несколько ошибок или кончились деньги — сообщить админу."""
+        self._failures += 1
+        text = str(exc)
+        no_money = any(
+            w in text.lower() for w in ("http 402", "insufficient", "balance", "quota", "billing")
+        )
+        if self.on_alert and (no_money or self._failures >= 3):
+            reason = "закончился баланс или квота" if no_money else "несколько ошибок подряд"
+            self.on_alert("ai", f"🤖 ИИ-провайдер недоступен ({reason}):\n{text[:300]}")
+
     async def _ask(self, user: User, system: str, prompt: str, **kw: Any) -> str:
-        reply = await self.llm.chat(system, prompt, **kw)
+        try:
+            reply = await self.llm.chat(system, prompt, **kw)
+        except LLMError as exc:
+            if not str(exc).startswith(("no JSON", "bad JSON", "JSON is not")):
+                self._provider_failed(exc)
+            raise
+        self._failures = 0
         self.db.add_tokens(user.id, reply.tokens)
         log.debug("llm user=%s tokens=%d", user.id, reply.tokens)
         return reply.text
@@ -341,7 +363,7 @@ class AIService:
                 "city": profile.city,
                 "work_formats": profile.work_formats,
                 "only_home_city": profile.only_home_city,
-                "level": profile.level,
+                "levels": profile.target_levels(),
                 "relocation": profile.relocation,
                 "salary_usd": profile.salary_usd,
                 "wishes": profile.wishes,
