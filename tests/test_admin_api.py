@@ -183,3 +183,12 @@ def test_overrides_file(tmp_path):
         save_overrides(path, {"ADMIN_IDS": "1"})
     with pytest.raises(ConfigError):
         save_overrides(path, {"SUPPORT_CONTACT": "a\nTELEGRAM_BOT_TOKEN=evil"})
+
+
+async def test_admin_api_reset(web, db):
+    onboarded_user(db, GUEST, queries=["qa"])
+    db.add_resume(GUEST, "CV", "Аналитик: BPMN, SQL, EPC. " * 5)
+    status, _ = await api(web, "POST", "/api/user", {"id": GUEST, "action": "reset"})
+    assert status == 200
+    user = db.get_user(GUEST)
+    assert not user.onboarded and user.allowed and db.get_resumes(GUEST) == []

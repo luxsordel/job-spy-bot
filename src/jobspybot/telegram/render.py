@@ -184,7 +184,9 @@ def _years(value: float) -> str:
     return f"{n} лет"
 
 
-def profile_card(p: UserProfile, queries: list[str], *, title: str = "👤 Профиль") -> str:
+def profile_card(
+    p: UserProfile, queries: list[str], *, title: str = "👤 Профиль", summary: str = ""
+) -> str:
     unknown = "<i>не указано</i>"
     head = " · ".join(escape(x) for x in (p.name, p.headline) if x)
     level = ", ".join(LEVEL_BUTTONS[lv] for lv in p.target_levels() if lv in LEVEL_BUTTONS)
@@ -210,15 +212,23 @@ def profile_card(p: UserProfile, queries: list[str], *, title: str = "👤 Пр�
     lines = [f"<b>{title}</b>"]
     if head:
         lines.append(head)
+    if summary:
+        lines.append(f"<i>{escape(summary)}</i>")
+    # блоки через пустую строку: кто я → что умею → где и как работать → чего хочу
+    lines += ["", f"📊 Уровень: {level_line}"]
+    if p.education:
+        lines.append("🎓 Образование:")
+        lines += [f"    • {escape(e)}" for e in p.education]
     lines += [
         "",
-        f"🎓 Уровень: {level_line}",
         f"🧩 Навыки: {_list(p.skills[:15], unknown)}",
         f"🗣 Языки: {_list(p.languages, unknown)}",
+        "",
         f"📍 Живу: {escape(place) if place else unknown} · гражданство {escape(p.citizenship)}",
         f"🏢 Формат: {escape(formats) if formats else unknown}"
         + (f" · только г. {escape(p.city)}" if p.only_home_city and p.city else ""),
         f"✈️ Релокация: {reloc}",
+        "",
         f"💰 Ожидания: {salary}",
         f"🔍 Ищу: {_list(queries or p.directions, unknown)}",
     ]
