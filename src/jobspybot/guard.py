@@ -145,6 +145,17 @@ class LogLine:
     level: str
     name: str
     text: str
+    seq: int = 0
+
+
+# разделы живого лога в админке: префиксы имён логгеров
+LOG_TOPICS: dict[str, tuple[str, ...]] = {
+    "cycle": ("jobspybot.pipeline",),
+    "sources": ("jobspybot.sources", "jobspybot.http"),
+    "ai": ("jobspybot.ai",),
+    "telegram": ("jobspybot.telegram",),
+    "admin": ("jobspybot.admin_web", "jobspybot.app", "jobspybot.backup"),
+}
 
 
 class LogBuffer(logging.Handler):
@@ -153,33 +164,50 @@ class LogBuffer(logging.Handler):
     def __init__(self, keep: int = 3000, level: int = logging.INFO) -> None:
         super().__init__(level=level)
         self.lines: deque[LogLine] = deque(maxlen=keep)
+        self.seq = 0  # номер последней строки — живой лог догружает только новые
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             text = record.getMessage()
             if record.exc_info and record.exc_info[1] is not None:
                 text += "\n" + logging.Formatter().formatException(record.exc_info)
+            self.seq += 1
             self.lines.append(
                 LogLine(
                     datetime.fromtimestamp(record.created, UTC),
                     record.levelname,
                     record.name,
                     text[:4000],
+                    self.seq,
                 )
             )
         except Exception:
             self.handleError(record)
 
-    def tail(self, limit: int = 200, *, level: str = "", query: str = "") -> list[LogLine]:
-        """Последние `limit` строк не ниже `level`, содержащие `query`."""
+    def tail(
+        self,
+        limit: int = 200,
+        *,
+        level: str = "",
+        query: str = "",
+        topic: str = "",
+        since: int = 0,
+    ) -> list[LogLine]:
+        """Последние `limit` строк не ниже `level`, содержащие `query`.
+
+        `topic` — раздел из `LOG_TOPICS`, `since` — только строки новее этого номера.
+        """
         min_level = logging.getLevelName(level.upper()) if level else 0
         if not isinstance(min_level, int):
             min_level = 0
         q = query.lower()
+        prefixes = LOG_TOPICS.get(topic, ())
         found = [
             line
             for line in self.lines
-            if logging.getLevelName(line.level) >= min_level
+            if line.seq > since
+            and logging.getLevelName(line.level) >= min_level
+            and (not prefixes or line.name.startswith(prefixes))
             and (not q or q in line.text.lower() or q in line.name.lower())
         ]
         return found[-limit:]

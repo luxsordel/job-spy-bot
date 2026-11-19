@@ -20,6 +20,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -43,6 +44,7 @@ from jobspybot.config import (
     save_overrides,
 )
 from jobspybot.db import Database, User, utcnow
+from jobspybot.guard import LOG_TOPICS
 from jobspybot.limits import MAX_GRANT_DAYS, parse_int
 from jobspybot.telegram import render as r
 
@@ -103,6 +105,10 @@ class Response:
     body: str = ""
     headers: dict[str, str] = field(default_factory=dict)
     content_type: str = "text/html; charset=utf-8"
+    csp: str = (
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+    )
 
     def encode(self) -> bytes:
         payload = self.body.encode("utf-8")
@@ -115,8 +121,7 @@ class Response:
             "X-Content-Type-Options: nosniff",
             "X-Frame-Options: DENY",
             "Referrer-Policy: no-referrer",
-            "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; "
-            "form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            f"Content-Security-Policy: {self.csp}",
             *(f"{k}: {v}" for k, v in self.headers.items()),
         ]
         return ("\r\n".join(head) + "\r\n\r\n").encode("latin-1") + payload
@@ -250,10 +255,83 @@ background:var(--accent);min-width:2px}
 .funnel .n{font-variant-numeric:tabular-nums;color:var(--muted)}
 .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
 table.kv td:last-child{white-space:normal;overflow-wrap:anywhere}
+.log{font:12px/1.55 ui-monospace,Consolas,monospace;background:var(--card);
+border:1px solid var(--line);border-radius:10px;padding:10px 14px;max-height:70vh;
+overflow-y:auto;overflow-wrap:anywhere}
+.log div{white-space:pre-wrap;padding:1px 0}
+.log div.new{animation:fresh 2s ease-out}
+@keyframes fresh{from{background:var(--warn-bg)}to{background:transparent}}
+.log .t{color:var(--muted)}.log .g{color:var(--accent)}
+.log .warn{color:var(--warn)}.log .bad{color:var(--bad)}
+.live{display:flex;gap:8px 18px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);
+margin-right:6px}.dot.on{background:var(--ok)}.dot.off{background:var(--bad)}
 @media (max-width:600px){.funnel .lbl{width:120px}
 .bar{justify-content:space-between}.bar nav{order:3;flex-basis:100%;gap:14px}
 .cols{grid-template-columns:1fr}}
 """
+
+LOG_TOPIC_LABELS = {
+    "cycle": "цикл и рассылка",
+    "sources": "площадки",
+    "ai": "ИИ и токены",
+    "telegram": "Telegram",
+    "admin": "админка и сервис",
+}
+LEVEL_CSS = {"ERROR": "bad", "CRITICAL": "bad", "WARNING": "warn"}
+
+
+def _log_topic(name: str) -> str:
+    for topic, prefixes in LOG_TOPICS.items():
+        if name.startswith(prefixes):
+            return LOG_TOPIC_LABELS[topic]
+    return name.removeprefix("jobspybot.")
+
+
+def _log_row(x: dict[str, Any]) -> str:
+    css = LEVEL_CSS.get(x["level"], "")
+    level = f" {escape(x['level'])}" if css else ""
+    return (
+        f'<div class="{css}"><span class="t">{escape(x["at"][11:19])}</span>'
+        f'{level} <span class="g">[{escape(_log_topic(x["name"]))}]</span> '
+        f"{escape(x['text'])}</div>"
+    )
+
+
+# опрос /logs/feed: новые строки — сверху; при прокрутке вниз или паузе — не мешаем читать
+LIVE_JS = """
+(function(){
+var log=document.getElementById('log'),seq=+log.dataset.seq,paused=false,busy=false;
+var btn=document.getElementById('pause'),dot=document.getElementById('dot'),
+st=document.getElementById('st');
+var topics=__TOPICS__,lvl={ERROR:'bad',CRITICAL:'bad',WARNING:'warn'};
+function topic(n){for(var k in topics){if(topics[k][0].some(function(p){
+return n.indexOf(p)===0}))return topics[k][1]}return n.replace('jobspybot.','')}
+function set(id,v){document.getElementById(id).textContent=v}
+function row(x){var d=document.createElement('div'),c=lvl[x.level]||'';d.className=c+' new';
+var t=document.createElement('span');t.className='t';t.textContent=x.at.slice(11,19);
+var g=document.createElement('span');g.className='g';g.textContent='['+topic(x.name)+']';
+d.append(t,(c?' '+x.level:'')+' ',g,' '+x.text);return d}
+function tick(){if(paused||busy)return;busy=true;
+var q=new URLSearchParams(location.search);q.set('since',seq);
+fetch('/logs/feed?'+q,{credentials:'same-origin'}).then(function(r){
+if(!r.ok)throw r.status;return r.json()}).then(function(d){
+if(d.seq<seq){seq=0}
+d.lines.forEach(function(x){log.prepend(row(x));seq=Math.max(seq,x.seq)});
+while(log.children.length>2000)log.lastChild.remove();
+set('cy',d.cycle);set('ai',d.ai_today);set('br',d.broken);
+dot.className='dot on';st.textContent=d.running?'онлайн · идёт цикл':'онлайн'})
+.catch(function(){dot.className='dot off';st.textContent='нет связи'})
+.finally(function(){busy=false})}
+btn.onclick=function(){paused=!paused;btn.textContent=paused?'Продолжить':'Пауза';
+dot.className='dot';st.textContent=paused?'пауза':'онлайн';if(!paused)tick()};
+setInterval(tick,2000);tick()})();
+""".replace(
+    "__TOPICS__",
+    json.dumps(
+        {k: [list(v), LOG_TOPIC_LABELS[k]] for k, v in LOG_TOPICS.items()}, ensure_ascii=False
+    ),
+)
 
 NAV = [
     ("/", "Обзор"),
@@ -316,7 +394,7 @@ class Broadcast:
 
 API_ENDPOINTS = [
     "GET /api/status",
-    "GET /api/logs?lines=200&level=WARNING&q=текст",
+    "GET /api/logs?lines=200&level=WARNING&q=текст&topic=ai&since=0",
     "GET /api/config",
     "POST /api/config {KEY: value}",
     "POST /api/restart",
@@ -450,6 +528,7 @@ class AdminWeb:
             ("POST", "/broadcast"): self._start_broadcast,
             ("GET", "/logout"): self._logout,
             ("GET", "/logs"): self._logs_page,
+            ("GET", "/logs/feed"): self._logs_feed,
             ("GET", "/settings"): self._settings_page,
             ("POST", "/settings"): self._save_settings,
             ("POST", "/restart"): self._restart,
@@ -882,58 +961,112 @@ class AdminWeb:
 
     # --- логи, настройки, перезапуск ---------------------------------------------
 
-    def _log_lines(self, limit: int, level: str, query: str) -> list[dict[str, str]]:
+    def _log_lines(
+        self, limit: int, level: str, query: str, *, topic: str = "", since: int = 0
+    ) -> list[dict[str, Any]]:
         if self.runtime.logs is None:
             return []
         return [
             {
+                "seq": ln.seq,
                 "at": ln.at.isoformat(timespec="seconds"),
                 "level": ln.level,
                 "name": ln.name,
                 "text": ln.text,
             }
-            for ln in self.runtime.logs.tail(limit, level=level, query=query)
+            for ln in self.runtime.logs.tail(
+                limit, level=level, query=query, topic=topic, since=since
+            )
         ]
 
-    async def _logs_page(self, req: Request) -> Response:
-        level = req.query.get("level", "")
-        query = req.query.get("q", "")[:100]
-        limit = min(2000, max(1, parse_int(req.query.get("lines", "300")) or 300))
-        options = "".join(
-            f'<option value="{v}"{" selected" if v == level else ""}>{label}</option>'
-            for v, label in (
-                ("", "все"),
-                ("WARNING", "предупреждения и ошибки"),
-                ("ERROR", "ошибки"),
+    def _live_state(self) -> dict[str, Any]:
+        """Полоска над живым логом: идёт ли цикл, расход ИИ, площадки с ошибкой."""
+        pipe = self.pipeline
+        cycle = "цикл не подключён"
+        if pipe and pipe.cycle_started:
+            cycle = f"идёт цикл поиска с {pipe.cycle_started:%H:%M:%S} UTC"
+        elif pipe and pipe.last_cycle and pipe.last_cycle_at:
+            c = pipe.last_cycle
+            cycle = (
+                f"последний цикл {pipe.last_cycle_at:%H:%M} UTC: получено {c.fetched}, "
+                f"новых {c.new}, ИИ {c.ai_calls}, отправлено {c.sent}"
             )
-        )
+        elif pipe:
+            cycle = "циклов ещё не было"
+        broken = sorted(n for n, st in pipe.status.items() if st.error) if pipe else []
+        return {
+            "seq": self.runtime.logs.seq if self.runtime.logs else 0,
+            "cycle": cycle,
+            "running": bool(pipe and pipe.cycle_started),
+            "ai_today": self._ai_today(utcnow().date().isoformat()),
+            "broken": ", ".join(broken) or "нет",
+        }
+
+    def _log_filters(self, req: Request) -> tuple[str, str, str, int]:
+        level = req.query.get("level", "")
+        if level not in ("", "WARNING", "ERROR"):
+            level = ""
+        topic = req.query.get("topic", "")
+        if topic not in LOG_TOPICS:
+            topic = ""
+        limit = min(2000, max(1, parse_int(req.query.get("lines", "300")) or 300))
+        return level, req.query.get("q", "")[:100], topic, limit
+
+    async def _logs_page(self, req: Request) -> Response:
+        level, query, topic, limit = self._log_filters(req)
+
+        def select(name: str, current: str, items: Iterable[tuple[str, str]]) -> str:
+            opts = "".join(
+                f'<option value="{v}"{" selected" if v == current else ""}>{label}</option>'
+                for v, label in items
+            )
+            return f'<select name="{name}">{opts}</select>'
+
         form = (
             '<form method="get" action="/logs" class="inline">'
-            f'<select name="level">{options}</select>'
-            f'<input name="q" value="{escape(query)}" placeholder="поиск">'
+            + select("topic", topic, [("", "все разделы"), *LOG_TOPIC_LABELS.items()])
+            + select(
+                "level",
+                level,
+                (("", "все"), ("WARNING", "предупреждения и ошибки"), ("ERROR", "ошибки")),
+            )
+            + f'<input name="q" value="{escape(query)}" placeholder="поиск">'
             f'<input name="lines" type="number" value="{limit}" min="1" max="2000" '
-            'style="width:90px">'
-            '<button class="ghost">Показать</button></form>'
+            'style="width:90px"><button class="ghost">Показать</button></form>'
         )
         if self.runtime.logs is None:
             return Response(
                 200, page("Логи", '<p class="muted">Логи не подключены</p>', active="/logs")
             )
-        lines = self._log_lines(limit, level, query)
-        css = {"ERROR": "bad", "CRITICAL": "bad", "WARNING": "warn"}
-        text = "\n".join(
-            f'<span class="muted">{escape(x["at"][5:16].replace("T", " "))}</span> '
-            f'<span class="pill {css.get(x["level"], "")}">{escape(x["level"])}</span> '
-            f'<span class="muted">{escape(x["name"])}</span> {escape(x["text"])}'
-            for x in reversed(lines)
-        )
+        lines = self._log_lines(limit, level, query, topic=topic)
+        state = self._live_state()
+        text = "".join(_log_row(x) for x in reversed(lines))
+        nonce = secrets.token_urlsafe(12)
         body = (
-            f'{form}<p class="muted">Свежие сверху, время UTC. Хранятся последние строки с момента '
-            f"запуска ({fmt_dt(self.runtime.started_at)}).</p>"
-            f'<div class="tg" style="font:12px/1.5 ui-monospace,Consolas,monospace">'
-            f"{text or 'Пусто'}</div>"
+            f"{form}"
+            '<div class="live card">'
+            '<span><span class="dot" id="dot"></span><b id="st">онлайн</b></span>'
+            f'<span id="cy">{escape(state["cycle"])}</span>'
+            f'<span>ИИ сегодня: <b id="ai">{escape(state["ai_today"])}</b></span>'
+            f'<span>Площадки с ошибкой: <b id="br">{escape(state["broken"])}</b></span>'
+            '<button class="ghost" id="pause" type="button">Пауза</button></div>'
+            '<p class="muted">Свежие сверху, время UTC, обновляется каждые 2 с. Хранятся '
+            f"последние строки с момента запуска ({fmt_dt(self.runtime.started_at)}).</p>"
+            f'<div class="log" id="log" data-seq="{state["seq"]}">'
+            f"{text or '<div class=muted>Пусто</div>'}</div>"
+            f"<script nonce={nonce}>{LIVE_JS}</script>"
         )
-        return Response(200, page("Логи", body, active="/logs"))
+        resp = Response(200, page("Логи", body, active="/logs"))
+        resp.csp += f"; script-src 'nonce-{nonce}'; connect-src 'self'"
+        return resp
+
+    async def _logs_feed(self, req: Request) -> Response:
+        """Новые строки для живого лога (опрос со страницы, вход по cookie)."""
+        level, query, topic, _ = self._log_filters(req)
+        since = parse_int(req.query.get("since", "0")) or 0
+        data = self._live_state()
+        data["lines"] = self._log_lines(500, level, query, topic=topic, since=since)
+        return json_response(data)
 
     def _config(self) -> list[dict[str, Any]]:
         """Текущие настройки: действующие сейчас и сохранённые в админке (до перезапуска)."""
@@ -1095,7 +1228,13 @@ class AdminWeb:
         if (m, path) == ("GET", "/logs"):
             limit = min(3000, max(1, parse_int(req.query.get("lines", "200")) or 200))
             return json_response(
-                self._log_lines(limit, req.query.get("level", ""), req.query.get("q", ""))
+                self._log_lines(
+                    limit,
+                    req.query.get("level", ""),
+                    req.query.get("q", ""),
+                    topic=req.query.get("topic", ""),
+                    since=parse_int(req.query.get("since", "0")) or 0,
+                )
             )
         if (m, path) == ("GET", "/config"):
             return json_response(self._config())

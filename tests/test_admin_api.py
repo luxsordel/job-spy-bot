@@ -209,3 +209,34 @@ async def test_admin_api_reset(web, db):
     assert status == 200
     user = db.get_user(GUEST)
     assert not user.onboarded and user.allowed and db.get_resumes(GUEST) == []
+
+
+async def test_live_logs_feed_returns_only_new_lines(web, runtime):
+    logging.getLogger("jobspybot.ai.service").info("ИИ оценка для 1: 900 токенов")
+    page_resp = await web.handle(Request("GET", "/logs", headers=cookie(web)))
+    # скрипт живого лога разрешён только по одноразовому nonce
+    assert "script-src 'nonce-" in page_resp.csp and "<script nonce=" in page_resp.body
+    assert "[ИИ и токены]" in page_resp.body
+    seq = runtime.logs.seq
+    logging.getLogger("jobspybot.sources").info("hh_by «python»: 25 вакансий за 1.0 с")
+    logging.getLogger("jobspybot.telegram.bot").info("← 1 @misha: /start")
+    feed = await web.handle(
+        Request("GET", "/logs/feed", headers=cookie(web), query={"since": str(seq)})
+    )
+    data = json.loads(feed.body)
+    assert [x["text"] for x in data["lines"]] == [
+        "hh_by «python»: 25 вакансий за 1.0 с",
+        "← 1 @misha: /start",
+    ]
+    assert data["seq"] == seq + 2 and data["running"] is False and "ai_today" in data
+    only_sources = await web.handle(
+        Request("GET", "/logs/feed", headers=cookie(web), query={"topic": "sources"})
+    )
+    assert [x["name"] for x in json.loads(only_sources.body)["lines"]] == ["jobspybot.sources"]
+    _, api_lines = await api(web, "GET", "/api/logs", topic="telegram", since=seq)
+    assert [x["text"] for x in api_lines] == ["← 1 @misha: /start"]
+
+
+async def test_live_logs_feed_needs_login(web):
+    resp = await web.handle(Request("GET", "/logs/feed"))
+    assert resp.status == 303 and resp.headers["Location"] == "/login"
