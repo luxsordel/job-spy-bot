@@ -25,6 +25,8 @@ ERROR_BACKOFF = 30 * 60
 
 
 class Evaluator(Protocol):
+    def is_ready(self, user: User) -> bool: ...
+
     async def evaluate(self, user: User, vacancy: Vacancy) -> Analysis | None: ...
 
 
@@ -143,6 +145,12 @@ class Pipeline:
                 for v in vacancies:
                     pool.setdefault(v.uid, v)
 
+        # навыки каждого резюме — отдельный набор: QA-вакансия проходит за счёт QA-резюме,
+        # а не тонет в общей куче навыков Python и C++
+        skill_sets = [r.skills for r in self.db.get_resumes(user.id) if r.skills]
+        if f.skills:
+            skill_sets.append(f.skills)
+
         passed: list[tuple[int, Vacancy]] = []
         seen_fp: set[str] = set()
         for v in pool.values():
@@ -150,8 +158,8 @@ class Pipeline:
                 continue
             seen_fp.add(v.fingerprint)
             reason = check(v, f, max_age_days=self.settings.max_vacancy_age_days)
-            score = local_score(v, f.skills)
-            if reason is None and f.skills and score < f.min_local_score:
+            score = max((local_score(v, s) for s in skill_sets), default=local_score(v, []))
+            if reason is None and skill_sets and score < f.min_local_score:
                 reason = f"мало совпадений навыков ({score})"
             if reason:
                 self.db.record(user.id, v, "filtered", reason, score)
@@ -185,7 +193,7 @@ class Pipeline:
         self, user: User, found: dict[tuple[str, str], list[Vacancy]], stats: CycleStats
     ) -> None:
         candidates = self.candidates(user, found, stats)
-        use_ai = self.evaluator is not None and bool(user.profile)
+        use_ai = self.evaluator is not None and self.evaluator.is_ready(user)
         if use_ai:
             # дорогой этап — только лучшие по локальному баллу, остальные подождут
             candidates = candidates[: self.settings.ai.max_per_cycle]

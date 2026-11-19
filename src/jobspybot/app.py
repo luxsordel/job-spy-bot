@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+from html import escape
 from typing import Any
 
 from jobspybot.ai.client import LLMClient
@@ -25,16 +26,27 @@ def wire_ai(bot: Bot, ai: AIService) -> None:
     """Подключает ИИ к боту: профиль из резюме и кнопка «Письмо» под вакансиями."""
     bot.on_resume = ai.build_profile
 
-    async def on_letter(user: User, cb: dict[str, Any], value: str) -> None:
+    async def on_apply(user: User, cb: dict[str, Any], value: str) -> None:
+        """Лучшее резюме под вакансию (файлом) + сопроводительное, написанное под него."""
         vacancy = bot.db.delivery_vacancy(user.id, int(value)) if value.isdigit() else None
         if vacancy is None:
             await bot.api.answer_callback(cb["id"], "Вакансия уже удалена из базы")
             return
-        await bot.api.answer_callback(cb["id"], "✍️ Пишу письмо…")
-        text = await ai.cover_letter(user, vacancy)
-        await bot.api.send_message(user.id, f"✉️ {vacancy.title}\n\n{text}", parse_mode=None)
+        resume = await ai.best_resume(user, vacancy)
+        if resume is None:
+            await bot.api.answer_callback(cb["id"], "Сначала пришлите резюме (PDF)")
+            return
+        await bot.api.answer_callback(cb["id"], f"✍️ Готовлю отклик: «{resume.title}»")
+        if resume.file_id:
+            await bot.api.send_document(
+                user.id, resume.file_id, f"📄 Резюме для «{escape(vacancy.title)}»"
+            )
+        letter = await ai.cover_letter(user, vacancy, resume)
+        await bot.api.send_message(
+            user.id, f"✉️ {vacancy.title}\n{vacancy.url}\n\n{letter}", parse_mode=None
+        )
 
-    bot.extra_buttons["cl"] = ("✉️ Письмо", on_letter)
+    bot.extra_buttons["cl"] = ("📄 Отклик", on_apply)
 
 
 async def run(settings: Settings) -> None:

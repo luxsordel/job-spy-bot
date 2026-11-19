@@ -27,9 +27,15 @@ PROFILE = {
 class FakeLLM:
     """OpenAI-совместимый сервер: отвечает по содержимому system-промпта."""
 
-    def __init__(self, scores: dict[str, int] | None = None, json_mode: bool = True):
+    def __init__(
+        self,
+        scores: dict[str, int] | None = None,
+        json_mode: bool = True,
+        best: dict[str, int] | None = None,
+    ):
         self.requests: list[dict] = []
         self.scores = scores or {}
+        self.best = best or {}
         self.json_mode = json_mode
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -49,7 +55,14 @@ class FakeLLM:
             content = (
                 "```json\n"
                 + json.dumps(
-                    {"score": score, "verdict": "ок", "pros": ["Django"], "cons": [], "by": "ok"}
+                    {
+                        "best": self.best.get(title, 1),
+                        "score": score,
+                        "verdict": "ок",
+                        "pros": ["Django"],
+                        "cons": [],
+                        "by": "ok",
+                    }
                 )
                 + "\n```"
             )
@@ -118,32 +131,42 @@ def test_compress_truncates():
     assert len(out) <= 500
 
 
-async def test_profile_built_and_skills_autofilled(db):
+def add_resume(db, user_id: int, title: str, profile: dict | None = None, **kw) -> int:
+    rid = db.add_resume(user_id, title, "текст резюме " * 10, **kw)
+    if profile is not None:
+        db.set_resume_profile(rid, json.dumps(profile, ensure_ascii=False))
+    return rid
+
+
+async def test_profile_built_from_redacted_resume(db):
     fake = FakeLLM()
     ai = make_ai(db, fake)
     user = db.ensure_user(1, allowed=True)
-    reply = await ai.build_profile(user, "резюме " * 20)
-    stored = db.get_user(1)
-    assert json.loads(stored.profile)["skills"] == ["python", "django", "postgresql"]
-    assert stored.filters.skills == ["python", "django", "postgresql"]
-    assert "Профиль готов" in reply
+    rid = db.add_resume(1, "Основное", "Иван, +375 (29) 123-45-67, ivan@mail.com, Python " * 3)
+    reply = await ai.build_profile(user, db.get_resume(1, rid))
+    stored = db.get_resume(1, rid)
+    assert stored.skills == ["python", "django", "postgresql"]
+    assert "Профиль «Основное» готов" in reply
     assert db.tokens_today(1) == 360
+    sent = fake.requests[0]["messages"][1]["content"]
+    assert "ivan@mail.com" not in sent and "123-45-67" not in sent
 
 
 async def test_evaluate_uses_cache_and_budget(db):
     fake = FakeLLM()
     ai = make_ai(db, fake, daily_tokens_per_user=1000)
     user = db.ensure_user(1, allowed=True)
-    user.profile = json.dumps(PROFILE, ensure_ascii=False)
+    add_resume(db, 1, "Основное", PROFILE)
     v = vac("1", "Python Dev", description="Требования:\nDjango")
     db.save_vacancies([v])
 
     first = await ai.evaluate(user, v)
     again = await ai.evaluate(user, v)
     assert first == again and first.score == 80
+    assert first.resume_title == ""  # резюме одно — в карточке не показываем
     assert len(fake.requests) == 1  # второй раз — из кэша
 
-    # профиль в system-сообщении, вакансия — в user: префикс общий для всех вакансий
+    # профили в system-сообщении, вакансия — в user: префикс общий для всех вакансий
     msgs = fake.requests[0]["messages"]
     assert '"python"' in msgs[0]["content"] and "Python Dev" in msgs[1]["content"]
     assert fake.requests[0]["max_tokens"] <= 450
@@ -154,11 +177,40 @@ async def test_evaluate_uses_cache_and_budget(db):
     assert len(fake.requests) == 3
 
 
+async def test_best_resume_is_chosen_from_shortlist(db):
+    fake = FakeLLM(best={"QA Engineer": 2})
+    ai = make_ai(db, fake)
+    user = db.ensure_user(1, allowed=True)
+    profiles = {
+        "Python": ["python", "django"],
+        "QA": ["qa", "selenium", "тестирование"],
+        "C++": ["c++", "qt"],
+        "Java": ["java", "spring"],
+        "1C": ["1с"],
+    }
+    ids = {
+        title: add_resume(db, 1, title, {**PROFILE, "skills": skills}, file_id=f"file-{title}")
+        for title, skills in profiles.items()
+    }
+    v = vac("1", "QA Engineer", skills=("Selenium",), snippet="ручное тестирование")
+
+    analysis = await ai.evaluate(user, v)
+    system = fake.requests[0]["messages"][0]["content"]
+    # в модель ушли только 3 резюме, и QA среди них
+    assert system.count("«") == 3 and "«QA»" in system
+    assert analysis.resume_id == ids["QA"]
+    assert analysis.resume_title == "QA"
+    assert "Подавать: «QA»" in analysis.render()
+    best = await ai.best_resume(user, v)
+    assert best.file_id == "file-QA"
+    assert len(fake.requests) == 1  # best_resume взял выбор из кэша
+
+
 async def test_json_mode_fallback(db):
     fake = FakeLLM(json_mode=False)
     ai = make_ai(db, fake)
     user = db.ensure_user(1, allowed=True)
-    user.profile = "{}"
+    add_resume(db, 1, "R", {})
     assert (await ai.evaluate(user, vac("1", "X"))).score == 80
     assert len(fake.requests) == 2
     await ai.evaluate(user, vac("2", "Y"))
@@ -178,8 +230,8 @@ async def test_pipeline_ai_stage(db):
 
     ai.describe = describe
     db.ensure_user(1, allowed=True)
-    db.save_filters(1, UserFilters(queries=["dev"], ai_threshold=60))
-    db.save_resume(1, "резюме", json.dumps(PROFILE, ensure_ascii=False))
+    db.save_filters(1, UserFilters(queries=["dev"], ai_threshold=60, min_local_score=0))
+    add_resume(db, 1, "Основное", PROFILE)
     notifier = FakeNotifier()
     settings = Settings(ai=AISettings(max_per_cycle=2))
     p = Pipeline(db, {"a": src}, notifier, settings, evaluator=ai)
@@ -193,12 +245,35 @@ async def test_pipeline_ai_stage(db):
     assert len(fake.requests) == 3
 
 
-async def test_cover_letter(db):
-    ai = make_ai(db, FakeLLM())
+async def test_local_score_uses_each_resume_separately(db):
+    """QA-вакансия проходит отсев за счёт QA-резюме, даже если остальные резюме — про Python."""
+    src = FakeSource(
+        "a",
+        {"x": [vac("1", "QA Engineer", snippet="selenium, тестирование"), vac("2", "Маркетолог")]},
+    )
+    db.ensure_user(1, allowed=True)
+    db.save_filters(1, UserFilters(queries=["x"], min_local_score=30))
+    for i, skills in enumerate(
+        [
+            ["python", "django", "fastapi", "postgresql", "docker"],
+            ["c++", "qt", "winapi"],
+            ["qa", "selenium", "тестирование"],
+        ]
+    ):
+        add_resume(db, 1, f"R{i}", {"skills": skills})
+    notifier = FakeNotifier()
+    await Pipeline(db, {"a": src}, notifier, Settings()).run_cycle()
+    assert [uid for _, uid in notifier.sent] == ["a:1"]
+
+
+async def test_cover_letter_uses_given_resume(db):
+    fake = FakeLLM()
+    ai = make_ai(db, fake)
     user = db.ensure_user(1, allowed=True)
-    assert "резюме" in await ai.cover_letter(user, vac("1", "X"))
-    user.profile = "{}"
-    assert "Django" in await ai.cover_letter(user, vac("1", "X"))
+    rid = add_resume(db, 1, "QA", {**PROFILE, "summary": "QA-инженер"})
+    letter = await ai.cover_letter(user, vac("1", "X"), db.get_resume(1, rid))
+    assert "Django" in letter
+    assert "QA-инженер" in fake.requests[0]["messages"][0]["content"]
 
 
 def test_salvage_truncated_reply():
@@ -221,5 +296,23 @@ async def test_evaluate_survives_truncated_json(db):
 
     ai = make_ai(db, Truncating())
     user = db.ensure_user(1, allowed=True)
-    user.profile = "{}"
+    add_resume(db, 1, "R", {})
     assert (await ai.evaluate(user, vac("1", "X"))).score == 71
+
+
+async def test_evaluate_retries_once_on_garbage(db):
+    class Flaky(FakeLLM):
+        def __call__(self, request):
+            resp = super().__call__(request)
+            if len(self.requests) == 1:
+                body = resp.json()
+                body["choices"][0]["message"]["content"] = '{"best'
+                return httpx.Response(200, json=body)
+            return resp
+
+    fake = Flaky()
+    ai = make_ai(db, fake)
+    user = db.ensure_user(1, allowed=True)
+    add_resume(db, 1, "R", {})
+    assert (await ai.evaluate(user, vac("1", "X"))).score == 80
+    assert len(fake.requests) == 2

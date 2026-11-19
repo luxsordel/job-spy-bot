@@ -77,6 +77,17 @@ class TelegramAPI:
             link_preview_options={"is_disabled": True},
         )
 
+    async def send_document(
+        self, chat_id: int, file_id: str, caption: str = "", parse_mode: str | None = "HTML"
+    ) -> dict[str, Any]:
+        return await self.call(
+            "sendDocument",
+            chat_id=chat_id,
+            document=file_id,
+            caption=caption[:1024] or None,
+            parse_mode=parse_mode if caption else None,
+        )
+
     async def edit_reply_markup(
         self, chat_id: int, message_id: int, reply_markup: dict[str, Any] | None
     ) -> None:
