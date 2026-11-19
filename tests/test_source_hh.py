@@ -7,62 +7,106 @@ from jobspybot.config import Settings
 from jobspybot.models import Level
 from jobspybot.sources import SourceUnavailable, build_sources
 from jobspybot.sources.hh import HHBelarus
-from tests.conftest import fixture_json, make_http
+from tests.conftest import fixture_text, make_http
 
 
-async def test_hh_search_parses_items(settings):
+def _page(name: str):
+    return lambda r: httpx.Response(200, text=fixture_text(name))
+
+
+async def test_hh_search_reads_site_page(settings):
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, json=fixture_json("hh_search.json"))
+        return httpx.Response(200, text=fixture_text("hh_search.html"))
 
     http = make_http(handler)
     found = await HHBelarus(http, settings).search("python")
     await http.aclose()
 
     req = seen[0]
+    assert req.url.host == "rabota.by" and req.url.path == "/search/vacancy"
     assert req.url.params["area"] == "16"
-    assert req.url.params["host"] == "rabota.by"
-    assert req.headers["Authorization"] == "Bearer test-token"
+    assert req.url.params["text"] == "python"
+    assert req.url.params["search_period"] == "7"
+    assert req.url.params["enable_snippets"] == "true"
+    assert "Authorization" not in req.headers
 
-    first, second = found
+    # дубль с тем же id отброшен
+    first, second, third = found
     assert first.uid == "hh_by:101"
-    assert first.currency == "BYN"
-    assert first.salary_from == 1500
-    assert first.remote is True
+    assert first.url == "https://rabota.by/vacancy/101"
+    assert first.company == "Пример"
+    assert first.location == "Минск" and first.country == "BY"
+    assert (first.salary_from, first.salary_to, first.currency) == (1500, 2500, "BYN")
     assert first.level is Level.JUNIOR
-    assert "Python" in first.snippet and "<" not in first.snippet
-    assert first.country == "BY"
-    assert second.salary_from is None and second.level is Level.LEAD and second.remote is False
+    assert first.snippet == "Знание Python и SQL. Писать сервисы на Django..."
+    assert first.skills == ("Python", "Django", "PostgreSQL")
+    assert first.published_at is not None and first.published_at.day == 19
+
+    assert second.salary_from is None and second.currency is None
+    assert second.level is Level.LEAD and second.remote is False
+
+    # почасовая ставка не попадает в месячную зарплату
+    assert third.salary_from is None and third.currency is None
 
 
-async def test_hh_forbidden_raises_source_unavailable(settings):
-    http = make_http(lambda r: httpx.Response(403, json={"errors": [{"type": "forbidden"}]}))
+async def test_hh_work_formats_and_address(settings):
+    http = make_http(_page("hh_search.html"))
+    first, second, third = await HHBelarus(http, settings).search("python")
+    await http.aclose()
+    assert first.work_formats == ("remote", "hybrid") and first.remote
+    assert first.address == "Минск, улица Притыцкого, 29 (м. Спортивная, Пушкинская)"
+    assert second.work_formats == ("office",) and not second.remote
+    assert third.work_formats == () and third.address == ""
+
+
+@pytest.mark.parametrize(("days", "period"), [(1, "1"), (2, "3"), (7, "7"), (10, "30"), (90, "30")])
+async def test_hh_search_period_rounds_up(days, period):
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, text=fixture_text("hh_search.html"))
+
+    http = make_http(handler)
+    await HHBelarus(http, Settings(max_vacancy_age_days=days)).search("python")
+    await http.aclose()
+    assert seen[0].url.params["search_period"] == period
+
+
+async def test_hh_description_includes_key_skills(settings):
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, text=fixture_text("hh_vacancy.html"))
+
+    http = make_http(handler)
+    source = HHBelarus(http, settings)
+    text = await source.fetch_description(source.parse_item({"vacancyId": 101, "name": "Dev"}))
+    await http.aclose()
+    assert str(seen[0].url) == "https://rabota.by/vacancy/101"
+    assert text == "Делать сервисы\n\nКлючевые навыки: Python, Django"
+
+
+async def test_hh_page_without_state_is_unavailable(settings):
+    captcha = "<html>Подтвердите, что вы не робот</html>"
+    http = make_http(lambda r: httpx.Response(200, text=captcha))
     with pytest.raises(SourceUnavailable):
         await HHBelarus(http, settings).search("python")
     await http.aclose()
 
 
-async def test_hh_description_includes_key_skills(settings):
-    payload = {"description": "<p>Делать <b>сервисы</b></p>", "key_skills": [{"name": "Python"}]}
-    http = make_http(lambda r: httpx.Response(200, json=payload))
-    vacancy = HHBelarus(http, settings).parse_item(fixture_json("hh_search.json")["items"][0])
-    text = await HHBelarus(http, settings).fetch_description(vacancy)
+async def test_hh_forbidden_raises_source_unavailable(settings):
+    http = make_http(lambda r: httpx.Response(403, text="Forbidden"))
+    with pytest.raises(SourceUnavailable):
+        await HHBelarus(http, settings).search("python")
     await http.aclose()
-    assert text == "Делать сервисы\n\nКлючевые навыки: Python"
 
 
-def test_hh_requires_token():
+def test_hh_needs_no_token():
     http = make_http(lambda r: httpx.Response(200))
-    assert "hh_by" not in build_sources(http, Settings())
-    assert "hh_by" in build_sources(http, Settings(hh_app_token="x"))
-
-
-async def test_hh_work_formats_and_address(settings):
-    http = make_http(lambda r: httpx.Response(200, json=fixture_json("hh_search.json")))
-    first, second = await HHBelarus(http, settings).search("python")
-    await http.aclose()
-    assert first.work_formats == ("remote", "hybrid") and first.remote
-    assert first.address == "Минск, улица Притыцкого, 29 (м. Спортивная, Пушкинская)"
-    assert second.work_formats == ("office",) and not second.remote
+    sources = build_sources(http, Settings())
+    assert {"hh_by", "hh_ru", "hh_kz"} <= set(sources)

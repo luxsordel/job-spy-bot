@@ -19,13 +19,13 @@ Telegram-бот, который следит за вакансиями на пл
 
 | | Площадка | Способ | Нужен ключ |
 |---|---|---|---|
-| 🇧🇾 | rabota.by | API HeadHunter | `HH_APP_TOKEN` |
+| 🇧🇾 | rabota.by | HTML HeadHunter | — |
 | 🇧🇾 | praca.by | HTML | — |
-| 🇷🇺 | hh.ru | API HeadHunter | `HH_APP_TOKEN` |
+| 🇷🇺 | hh.ru | HTML HeadHunter | — |
 | 🇷🇺 | Habr Карьера | JSON | — |
 | 🇷🇺 | GetMatch | JSON | — |
 | 🇷🇺 | SuperJob | API | `SUPERJOB_API_KEY` |
-| 🇰🇿 | hh.kz | API HeadHunter | `HH_APP_TOKEN` |
+| 🇰🇿 | hh.kz | HTML HeadHunter | — |
 | 🇬🇪 | jobs.ge | HTML | — |
 | 🇵🇱 | justjoin.it | JSON | — |
 | 🇵🇱 | No Fluff Jobs | JSON | — |
@@ -33,8 +33,8 @@ Telegram-бот, который следит за вакансиями на пл
 Площадки без ключа просто пропускаются. Проверить, что работает:
 `python -m jobspybot check-sources "python developer"`.
 
-> **HeadHunter**: анонимные запросы к API сейчас получают `403`. Зарегистрируйте приложение
-> на [dev.hh.ru](https://dev.hh.ru) и укажите токен приложения в `HH_APP_TOKEN`.
+> **HeadHunter**: официальный API без зарегистрированного приложения отвечает `403`, поэтому бот
+> читает обычные страницы поиска и вакансий (данные встроены в них как JSON). Ключ не нужен.
 
 ## Как это работает
 
