@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -68,13 +68,14 @@ def make_ai(db, fake: FakeLLM, **ai_kw) -> AIService:
 
 
 def vac(ext: str, title: str, **kw) -> Vacancy:
+    # явное время публикации: при равном балле новые идут первыми, порядок детерминирован
+    kw.setdefault("published_at", datetime.now(UTC) - timedelta(minutes=int(ext)))
     return Vacancy(
         source="a",
         external_id=ext,
         title=title,
         url=f"https://x/{ext}",
         company=f"C{ext}",
-        published_at=datetime.now(UTC),
         **kw,
     )
 
