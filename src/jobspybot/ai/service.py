@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from html import escape
@@ -43,8 +44,10 @@ EVAL_SYSTEM = """Ты оцениваешь, насколько вакансия 
 Беларуси: если вакансия для него недоступна или рискованна (нужно гражданство/разрешение на \
 работу без визовой поддержки, только резиденты страны, ограничения для граждан РБ), отметь это.
 Ответь только JSON:
-{"score": 0-100, "verdict": "до 100 символов", "pros": ["до 3 пунктов по 60 символов"], \
-"cons": ["до 3 пунктов по 60 символов"], "by": "ok|risk|no", "by_note": "до 80 символов"}
+{"score": 0-100, "by": "ok|risk|no", "verdict": "до 90 символов", \
+"pros": ["до 2 пунктов по 50 символов"], "cons": ["до 2 пунктов по 50 символов"], \
+"by_note": "до 70 символов или пусто"}
+Пиши коротко, без повторов.
 
 Профиль кандидата:
 """
@@ -96,6 +99,20 @@ class Analysis:
             icon = {"ok": "🇧🇾", "risk": "⚠️", "no": "⛔"}[self.by]
             lines.append(f"{icon} {escape(self.by_note or 'есть ограничения для граждан РБ')}")
         return "\n".join(lines)
+
+
+_SALVAGE = {
+    "score": re.compile(r'"score"\s*:\s*"?(\d{1,3})'),
+    "by": re.compile(r'"by"\s*:\s*"(ok|risk|no)"'),
+    "verdict": re.compile(r'"verdict"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+    "by_note": re.compile(r'"by_note"\s*:\s*"((?:[^"\\]|\\.)*)"'),
+}
+
+
+def salvage_json(text: str) -> dict[str, Any] | None:
+    """Достаёт ключевые поля из ответа, обрезанного по max_tokens. Без балла — None."""
+    found = {k: m.group(1) for k, rx in _SALVAGE.items() if (m := rx.search(text))}
+    return found if "score" in found else None
 
 
 def profile_hash(profile: str) -> str:
@@ -205,10 +222,18 @@ class AIService:
                 user,
                 EVAL_SYSTEM + user.profile,
                 vacancy_prompt(vacancy, description),
-                max_tokens=250,
+                # с запасом: оплачиваются только реально сгенерированные токены,
+                # а обрезанный посередине JSON — это выброшенный запрос
+                max_tokens=450,
                 json_mode=True,
             )
-            analysis = Analysis.from_data(parse_json(text))
+            try:
+                data = parse_json(text)
+            except LLMError:
+                data = salvage_json(text)
+                if data is None:
+                    raise
+            analysis = Analysis.from_data(data)
         except LLMError as exc:
             log.warning("evaluate %s for %s failed: %s", vacancy.uid, user.id, exc)
             return None
