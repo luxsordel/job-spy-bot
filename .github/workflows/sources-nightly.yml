@@ -1,0 +1,55 @@
+name: Ночная проверка площадок
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # 06:30 по Минску
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: sources-nightly
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # на форках не запускаем: там нет смысла и нельзя создавать issues в основном репозитории
+    if: github.repository == 'luxsordel/job-spy-bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e .
+      - name: check-sources
+        id: check
+        # секреты не нужны: площадки проверяются анонимно, ключи ИИ и Telegram не передаются
+        run: |
+          set +e
+          python -X utf8 -m jobspybot --env /dev/null check-sources --strict "python developer" | tee report.txt
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+      - name: Issue о сбое
+        if: steps.check.outputs.code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Ночная проверка: площадки не отвечают"
+          {
+            echo "Проверка $(date -u +%F) нашла сбои ([лог]($RUN_URL)):"
+            echo
+            echo '```'
+            grep -E 'недоступна|ошибка|пустая выдача' report.txt || cat report.txt
+            echo '```'
+          } > body.md
+          num=$(gh issue list --state open --search "in:title \"$title\"" --json number -q '.[0].number')
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi
