@@ -679,7 +679,8 @@ class AdminWeb:
                 (
                     "За 7 дней",
                     f"прислано {stats.get('sent', 0)}, отсеяно {stats.get('filtered', 0)}, "
-                    f"ИИ отклонил {stats.get('ai_rejected', 0)}, скрыто {stats.get('disliked', 0)}",
+                    f"ИИ отклонил {stats.get('ai_rejected', 0)}, "
+                    f"скрыто {stats.get('disliked', 0)}, понравилось {stats.get('liked', 0)}",
                 ),
             ],
             kv=True,
@@ -748,6 +749,7 @@ class AdminWeb:
         resume_rows = [(escape(x.title), escape(", ".join(x.skills[:10]) or "—")) for x in resumes]
         status_pill = {
             "sent": '<span class="pill ok">прислал</span>',
+            "liked": '<span class="pill ok">понравилась 👍</span>',
             "disliked": '<span class="pill">скрыл 👎</span>',
             "filtered": '<span class="pill">отсеял</span>',
             "ai_rejected": '<span class="pill warn">ИИ отклонил</span>',
