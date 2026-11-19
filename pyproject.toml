@@ -32,6 +32,8 @@ packages = ["src/jobspybot"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# новые версии ruff форматируют и код в Markdown — примеры в документации оставляем как есть
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
