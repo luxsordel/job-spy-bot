@@ -134,6 +134,7 @@ class User:
     banned: bool = False
     last_seen: datetime | None = None
     created_at: datetime | None = None
+    trial_until: datetime | None = None
     stopped_at: datetime | None = None
 
     @classmethod
@@ -142,6 +143,7 @@ class User:
             banned=bool(row["banned"]),
             last_seen=_dt(row["last_seen"]),
             created_at=_dt(row["created_at"]),
+            trial_until=_dt(row["trial_until"]),
             stopped_at=_dt(row["stopped_at"]),
             id=row["id"],
             username=row["username"],
@@ -171,6 +173,8 @@ _USER_COLUMNS = [
     ("notified", "TEXT NOT NULL DEFAULT ''"),
     ("banned", "INTEGER NOT NULL DEFAULT 0"),
     ("last_seen", "TEXT"),
+    #: конец пробного периода: Pro дольше — значит, оплачен или выдан админом
+    ("trial_until", "TEXT"),
     #: когда человек остановил или заблокировал бота (None — бот доступен)
     ("stopped_at", "TEXT"),
 ]
@@ -575,6 +579,11 @@ class Database:
             "UPDATE users SET plan_until = ?, notified = '',"
             " trial_used = COALESCE(?, trial_used) WHERE id = ?",
             (until.isoformat(), None if trial_used is None else int(trial_used), user_id),
+        )
+
+    def set_trial_until(self, user_id: int, until: datetime) -> None:
+        self.conn.execute(
+            "UPDATE users SET trial_until = ? WHERE id = ?", (until.isoformat(), user_id)
         )
 
     def set_subscription(self, user_id: int, charge_id: str | None) -> None:
