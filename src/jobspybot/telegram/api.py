@@ -57,7 +57,7 @@ class TelegramAPI:
             "getUpdates",
             offset=offset,
             timeout=timeout,
-            allowed_updates=["message", "callback_query"],
+            allowed_updates=["message", "callback_query", "pre_checkout_query"],
         )
 
     async def send_message(
@@ -107,6 +107,52 @@ class TelegramAPI:
             commands=[{"command": c, "description": d} for c, d in commands],
         )
 
+    # --- Telegram Stars -------------------------------------------------------
+
+    async def create_invoice_link(
+        self,
+        *,
+        title: str,
+        description: str,
+        payload: str,
+        amount: int,
+        subscription_period: int | None = None,
+    ) -> str:
+        """Ссылка на оплату звёздами; с subscription_period — подписка с автопродлением."""
+        return await self.call(
+            "createInvoiceLink",
+            title=title[:32],
+            description=description[:255],
+            payload=payload[:128],
+            currency="XTR",
+            prices=[{"label": title[:32], "amount": amount}],
+            subscription_period=subscription_period,
+        )
+
+    async def answer_pre_checkout(self, query_id: str, ok: bool, error: str | None = None) -> None:
+        await self.call(
+            "answerPreCheckoutQuery", pre_checkout_query_id=query_id, ok=ok, error_message=error
+        )
+
+    async def set_star_subscription_canceled(
+        self, user_id: int, charge_id: str, canceled: bool
+    ) -> None:
+        await self.call(
+            "editUserStarSubscription",
+            user_id=user_id,
+            telegram_payment_charge_id=charge_id,
+            is_canceled=canceled,
+        )
+
+    async def refund_star_payment(self, user_id: int, charge_id: str) -> None:
+        await self.call("refundStarPayment", user_id=user_id, telegram_payment_charge_id=charge_id)
+
+    # --- профиль бота -------------------------------------------------------
+
+    async def set_profile_texts(self, description: str, short_description: str) -> None:
+        await self.call("setMyDescription", description=description[:512])
+        await self.call("setMyShortDescription", short_description=short_description[:120])
+
     async def get_me(self) -> dict[str, Any]:
         return await self.call("getMe")
 
@@ -124,6 +170,18 @@ class TelegramAPI:
 
 def inline_keyboard(*rows: list[dict[str, str]]) -> dict[str, Any]:
     return {"inline_keyboard": [row for row in rows if row]}
+
+
+def reply_keyboard(*rows: list[str], placeholder: str = "") -> dict[str, Any]:
+    """Постоянная клавиатура под полем ввода (главное меню)."""
+    markup: dict[str, Any] = {
+        "keyboard": [[{"text": t} for t in row] for row in rows],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+    if placeholder:
+        markup["input_field_placeholder"] = placeholder[:64]
+    return markup
 
 
 def button(text: str, *, data: str | None = None, url: str | None = None) -> dict[str, str]:
