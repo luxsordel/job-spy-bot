@@ -1,0 +1,122 @@
+"""Настройки из переменных окружения и файла `.env`.
+
+Сторонние библиотеки (pydantic-settings, python-dotenv) не используются намеренно —
+каждый мегабайт RAM на счету.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from jobspybot import __version__
+
+USER_AGENT = f"job-spy-bot/{__version__} (+https://github.com/luxsordel/job-spy-bot)"
+
+
+class ConfigError(ValueError):
+    """Некорректная конфигурация."""
+
+
+def parse_dotenv(text: str) -> dict[str, str]:
+    """Простой парсер `.env`: KEY=VALUE, комментарии `#`, кавычки вокруг значения."""
+    result: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        result[key.strip()] = value
+    return result
+
+
+def load_env(path: str | os.PathLike[str] | None = ".env") -> dict[str, str]:
+    """Значения из `.env`, поверх которых накладываются реальные переменные окружения."""
+    env: dict[str, str] = {}
+    if path and Path(path).is_file():
+        env.update(parse_dotenv(Path(path).read_text(encoding="utf-8")))
+    env.update(os.environ)
+    return env
+
+
+def _int(env: Mapping[str, str], key: str, default: int) -> int:
+    raw = env.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} должно быть целым числом, получено {raw!r}") from exc
+
+
+def _csv(env: Mapping[str, str], key: str) -> list[str]:
+    return [p.strip() for p in env.get(key, "").split(",") if p.strip()]
+
+
+@dataclass(frozen=True, slots=True)
+class AISettings:
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    daily_tokens_per_user: int = 40_000
+    max_description_chars: int = 2_500
+    max_per_cycle: int = 10
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.base_url and self.api_key and self.model)
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    telegram_token: str = ""
+    admin_ids: frozenset[int] = frozenset()
+    db_path: Path = Path("data/jobspy.sqlite3")
+    poll_interval_min: int = 30
+    max_vacancy_age_days: int = 7
+    enabled_sources: frozenset[str] = frozenset()  # пусто = все
+    hh_app_token: str = ""
+    superjob_api_key: str = ""
+    http_timeout: float = 20.0
+    user_agent: str = USER_AGENT
+    log_level: str = "INFO"
+    ai: AISettings = field(default_factory=AISettings)
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> Settings:
+        try:
+            admin_ids = frozenset(int(x) for x in _csv(env, "ADMIN_IDS"))
+        except ValueError as exc:
+            raise ConfigError("ADMIN_IDS — список числовых Telegram id через запятую") from exc
+
+        settings = cls(
+            telegram_token=env.get("TELEGRAM_BOT_TOKEN", "").strip(),
+            admin_ids=admin_ids,
+            db_path=Path(env.get("DB_PATH", "").strip() or "data/jobspy.sqlite3"),
+            poll_interval_min=_int(env, "POLL_INTERVAL_MIN", 30),
+            max_vacancy_age_days=_int(env, "MAX_VACANCY_AGE_DAYS", 7),
+            enabled_sources=frozenset(s.lower() for s in _csv(env, "ENABLED_SOURCES")),
+            hh_app_token=env.get("HH_APP_TOKEN", "").strip(),
+            superjob_api_key=env.get("SUPERJOB_API_KEY", "").strip(),
+            log_level=(env.get("LOG_LEVEL", "").strip() or "INFO").upper(),
+            ai=AISettings(
+                base_url=env.get("AI_BASE_URL", "").strip().rstrip("/"),
+                api_key=env.get("AI_API_KEY", "").strip(),
+                model=env.get("AI_MODEL", "").strip(),
+                daily_tokens_per_user=_int(env, "AI_DAILY_TOKENS_PER_USER", 40_000),
+                max_description_chars=_int(env, "AI_MAX_DESCRIPTION_CHARS", 2_500),
+                max_per_cycle=_int(env, "AI_MAX_PER_CYCLE", 10),
+            ),
+        )
+        if settings.poll_interval_min < 5:
+            raise ConfigError("POLL_INTERVAL_MIN не может быть меньше 5 — площадки забанят")
+        return settings
