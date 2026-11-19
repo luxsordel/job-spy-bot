@@ -1,10 +1,25 @@
-/target/
-.idea/
-.vscode/
-*.class
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime
+.env
+data/
+*.sqlite3
+*.sqlite3-*
 *.log
 
-target\maven-status\maven-compiler-plugin\compile\default-compile
-
-application.properties
-seen_ids.txt
+# IDE
+.idea/
+.vscode/
+*.iml
+.DS_Store
