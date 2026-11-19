@@ -44,3 +44,20 @@ def db():
     database = Database(":memory:")
     yield database
     database.close()
+
+
+@pytest.fixture
+def tg():
+    from tests.test_bot import FakeTelegram
+
+    return FakeTelegram()
+
+
+@pytest.fixture
+def bot(db, tg):
+    from jobspybot.telegram.api import TelegramAPI
+    from jobspybot.telegram.bot import Bot
+    from tests.test_bot import ADMIN
+
+    api = TelegramAPI("TOKEN", transport=httpx.MockTransport(tg))
+    return Bot(api, db, Settings(admin_ids=frozenset({ADMIN})), ["habr", "hh_by", "justjoin"])

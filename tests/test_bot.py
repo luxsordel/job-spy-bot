@@ -4,7 +4,6 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import httpx
-import pytest
 
 from jobspybot.config import BillingSettings, Settings
 from jobspybot.filters import UserFilters
@@ -47,17 +46,6 @@ class FakeTelegram:
             for m, p in self.calls
             if m == "sendMessage" and (chat_id is None or p["chat_id"] == chat_id)
         ]
-
-
-@pytest.fixture
-def tg():
-    return FakeTelegram()
-
-
-@pytest.fixture
-def bot(db, tg):
-    api = TelegramAPI("TOKEN", transport=httpx.MockTransport(tg))
-    return Bot(api, db, Settings(admin_ids=frozenset({ADMIN})), ["habr", "hh_by", "justjoin"])
 
 
 def message(user_id: int, text: str) -> dict:

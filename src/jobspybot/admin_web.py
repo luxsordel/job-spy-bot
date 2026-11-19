@@ -316,7 +316,8 @@ API_ENDPOINTS = [
     "POST /api/cycle",
     "GET /api/users?q=",
     "GET /api/user?id=ID",
-    "POST /api/user {id, action: grant|allow|deny|ban|unban|pause|unpause|message|delete, ...}",
+    "POST /api/user {id, action: grant|allow|deny|ban|unban|pause|unpause|reset|message|"
+    "delete, ...}",
 ]
 
 SEGMENTS = {
@@ -704,6 +705,7 @@ class AdminWeb:
             ),
             act("deny", "Закрыть доступ") if user.allowed else act("allow", "Открыть доступ", ""),
             act("unpause", "Возобновить поиск") if user.paused else act("pause", "Пауза"),
+            act("reset", "Сбросить настройку"),
         ]
         if not is_admin:
             actions.append(
@@ -825,6 +827,13 @@ class AdminWeb:
         if action in ("pause", "unpause"):
             self.db.set_paused(user.id, action == "pause")
             return True, "Поиск на паузе" if action == "pause" else "Поиск возобновлён"
+        if action == "reset":
+            # резюме, профиль и фильтры — с нуля; доступ, подписка и история остаются
+            if self.bot is not None:
+                await self.bot.reset_setup(user)
+            else:
+                self.db.reset_setup(user.id)
+            return True, "Настройка сброшена — при следующем /start начнётся заново"
         if action in ("ban", "unban"):
             if is_admin:
                 return False, "Администратора забанить нельзя"

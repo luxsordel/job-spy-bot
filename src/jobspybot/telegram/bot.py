@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -65,6 +66,7 @@ COMMANDS = [
     ("stats", "Статистика"),
     ("help", "Помощь"),
     ("privacy", "Мои данные и их удаление"),
+    ("reset", "Настроить поиск заново"),
 ]
 
 BOT_DESCRIPTION = (
@@ -78,6 +80,22 @@ BOT_SHORT_DESCRIPTION = "Вакансии BY · RU · KZ · GE · PL с ИИ-о�
 
 _SPLIT = re.compile(r"[;,\n]+")
 MAX_RESUME_CHARS = 8000
+#: резюме текстом — не меньше стольких букв (а не «0000…» или набор цифр)
+MIN_RESUME_LETTERS = 40
+#: Telegram режет текст длиннее 4096 символов на несколько сообщений подряд
+TG_MAX_TEXT = 4096
+#: сообщение такой длины — вероятно, кусок длинного; следующие куски приходят в ту же секунду
+SPLIT_MIN_LEN = 3500
+SPLIT_GAP_SEC = 2
+
+#: вопросы анкеты в винительном падеже — «потом спрошу …»
+QUESTION_NAMES = {
+    "directions": "направления поиска",
+    "level": "уровень вакансий",
+    "work_formats": "формат работы",
+    "relocation": "релокацию",
+    "salary": "зарплату",
+}
 
 ResumeHook = Callable[[User, Resume], Awaitable[str]]
 EditHook = Callable[[User, str], Awaitable[dict[str, Any] | None]]
@@ -86,6 +104,37 @@ CallbackHook = Callable[[User, dict[str, Any], str], Awaitable[None]]
 
 def parse_list(raw: str) -> list[str]:
     return clean_list(_SPLIT.split(raw))
+
+
+def looks_like_resume(text: str) -> bool:
+    return sum(ch.isalpha() for ch in text) >= MIN_RESUME_LETTERS
+
+
+def merge_split_messages(updates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Склеивает куски одного длинного сообщения, которые Telegram прислал подряд.
+
+    Иначе каждый кусок обрабатывается как отдельный ответ: кусок «зарплаты» из тысяч
+    нулей становился резюме, следующий — перезапускал онбординг, и так по кругу.
+    """
+    merged: list[dict[str, Any]] = []
+    for update in updates:
+        msg = update.get("message") or {}
+        prev = (merged[-1].get("message") or {}) if merged else {}
+        text = msg.get("text")
+        if (
+            text
+            and prev.get("text")
+            and len(prev["text"]) >= SPLIT_MIN_LEN
+            and not text.startswith("/")
+            and (prev.get("from") or {}).get("id") == (msg.get("from") or {}).get("id")
+            and (prev.get("chat") or {}).get("id") == (msg.get("chat") or {}).get("id")
+            and abs((msg.get("date") or 0) - (prev.get("date") or 0)) <= SPLIT_GAP_SEC
+        ):
+            prev["text"] = prev["text"] + "\n" + text
+            merged[-1]["update_id"] = update["update_id"]
+            continue
+        merged.append(update)
+    return merged
 
 
 def main_menu() -> dict[str, Any]:
@@ -119,6 +168,8 @@ class Bot:
         #: разбор фразы «хочу только гибрид…» в правку профиля (подключается модулем ИИ)
         self.on_profile_edit: EditHook | None = None
         self._pending_patch: dict[int, dict[str, Any]] = {}
+        #: время (date из Telegram) последнего очень длинного сообщения пользователя
+        self._long_text_at: dict[int, int] = {}
         self.limiter = RateLimiter(settings.guard.rate_limit_per_min)
         self._menu_actions: dict[str, Callable[[User], Awaitable[None]]] = {
             r.BTN_SEARCH: self.show_search,
@@ -150,7 +201,7 @@ class Bot:
                 log.warning("getUpdates failed: %s", exc)
                 await asyncio.sleep(5)
                 continue
-            for update in updates:
+            for update in merge_split_messages(updates):
                 offset = update["update_id"] + 1
                 try:
                     await self.handle_update(update)
@@ -218,6 +269,25 @@ class Bot:
             await self.handle_pre_checkout(update["pre_checkout_query"])
         elif "message" in update:
             await self.handle_message(update["message"])
+        elif "my_chat_member" in update:
+            await self.handle_chat_member(update["my_chat_member"])
+
+    async def handle_chat_member(self, change: dict[str, Any]) -> None:
+        """Человек остановил или заблокировал бота — рассылку ставим на паузу.
+
+        Telegram не сообщает об удалении переписки без остановки бота, поэтому при
+        возвращении через /start спрашиваем, продолжить ли с прежними настройками.
+        """
+        if (change.get("chat") or {}).get("type") != "private":
+            return
+        uid = (change.get("from") or {}).get("id")
+        status = (change.get("new_chat_member") or {}).get("status")
+        if not isinstance(uid, int) or self.db.get_user(uid) is None:
+            return
+        if status == "kicked":
+            self.db.set_stopped(uid, True)
+            self._forget(uid)
+            log.info("user %s stopped the bot", uid)
 
     async def _throttled(self, update: dict[str, Any]) -> bool:
         """Слишком частые сообщения и нажатия отбрасываются (оплаты — никогда)."""
@@ -279,6 +349,10 @@ class Bot:
         if user.banned and not self._is_admin(user):
             return
 
+        if self._is_split_tail(user, msg):
+            log.info("dropped tail of a split message from %s", user.id)
+            return
+
         text = (msg.get("text") or "").strip()
         if text.startswith("/"):
             cmd, _, args = text[1:].partition(" ")
@@ -301,6 +375,15 @@ class Bot:
 
         if not cmd and user.id in self._awaiting:
             await self._receive_input(user, self._awaiting.pop(user.id), text)
+            return
+
+        if not cmd and not user.onboarded and self._has_setup(user):
+            # посреди настройки: не перезапускать онбординг каждым случайным сообщением
+            await self.reply(
+                user,
+                "Ответьте на вопрос выше кнопками 👆 или пришлите резюме файлом.\n"
+                "Начать настройку заново — /start.",
+            )
             return
 
         if cmd == "start" or (not user.onboarded and not cmd):
@@ -350,11 +433,68 @@ class Bot:
 
     # --- старт и онбординг ---------------------------------------------------
 
+    def _is_split_tail(self, user: User, msg: dict[str, Any]) -> bool:
+        """Кусок длинного сообщения, не склеенный с началом (пришёл другой пачкой)."""
+        text = msg.get("text") or ""
+        date = msg.get("date")
+        if not text or not isinstance(date, int):
+            return False
+        prev = self._long_text_at.get(user.id)
+        if len(text) >= SPLIT_MIN_LEN:
+            self._long_text_at[user.id] = date
+        return prev is not None and not text.startswith("/") and 0 <= date - prev <= SPLIT_GAP_SEC
+
+    def _has_setup(self, user: User) -> bool:
+        """Есть ли что сбрасывать: резюме, профиль или направления поиска."""
+        return bool(
+            self._resume_count(user)
+            or user.filters.queries
+            or not self.db.get_profile(user.id).is_empty
+        )
+
+    def _forget(self, user_id: int) -> None:
+        """Забыть незаконченный ввод и режим анкеты."""
+        for state in (self._awaiting, self._profile_mode, self._pending_patch):
+            state.pop(user_id, None)
+
+    async def reset_setup(self, user: User) -> None:
+        """«Начать заново»: стирает резюме, профиль и фильтры; доступ и подписка остаются."""
+        self.db.reset_setup(user.id)
+        self._forget(user.id)
+        fresh = self.db.get_user(user.id)
+        assert fresh is not None
+        user.filters, user.onboarded, user.paused, user.stopped_at = (
+            fresh.filters,
+            False,
+            False,
+            None,
+        )
+
     async def cmd_start(self, user: User, args: str, *, first_name: str = "") -> None:
+        if user.onboarded and user.stopped_at:
+            # вернулся после остановки бота (часто — вместе с удалением переписки)
+            await self.reply(
+                user,
+                "👋 С возвращением! Продолжить поиск с прежними настройками "
+                "или настроить всё заново?",
+                inline_keyboard(
+                    [button("▶️ Продолжить", data="back:keep")],
+                    [button("🔄 Начать заново", data="back:reset")],
+                ),
+            )
+            return
         if user.onboarded:
             await self.reply(user, "Главное меню 👇", main_menu())
             await self.show_search(user)
             return
+        if self._has_setup(user):
+            # не закончил настройку и нажал «Старт» — начинаем с чистого листа
+            await self.reset_setup(user)
+            await self.reply(user, "🔄 Начинаем заново — прежние ответы и резюме стёрты.")
+        elif user.stopped_at:
+            self.db.set_stopped(user.id, False)
+            self.db.set_paused(user.id, False)
+            user.stopped_at, user.paused = None, False
         trial = self.billing.start_trial(user) and self.settings.billing.trial_days
         await self.reply(user, r.welcome(first_name, trial or 0), main_menu())
         self._awaiting[user.id] = "resume"
@@ -493,17 +633,23 @@ class Bot:
             await self.reply(user, text, markup)
 
     async def show_profile(
-        self, user: User, msg: dict[str, Any] | None = None, *, title: str = "👤 Профиль"
+        self,
+        user: User,
+        msg: dict[str, Any] | None = None,
+        *,
+        title: str = "👤 Профиль",
+        summary: str = "",
     ) -> None:
         profile = self.db.get_profile(user.id)
         missing = profile.missing(user.filters)
-        text = r.profile_card(profile, user.filters.queries, title=title)
+        text = r.profile_card(profile, user.filters.queries, title=title, summary=summary)
         if profile.is_empty:
             text += "\n\n<i>Пришлите резюме PDF — заполню профиль автоматически.</i>"
         elif not user.onboarded:
+            then = ", ".join(QUESTION_NAMES[q] for q in missing)
             text += (
                 "\n\n<i>ИИ мог ошибиться — поправьте кнопками ниже то, что не так, "
-                "и нажмите «Всё верно».</i>"
+                "и нажмите «Всё верно»." + (f" Потом спрошу {then}." if then else "") + "</i>"
             )
         rows = [
             [
@@ -1194,34 +1340,59 @@ class Bot:
     ) -> None:
         self._awaiting.pop(user.id, None)
         text = text.strip()[:MAX_RESUME_CHARS]
-        if len(text) < 50:
-            await self.reply(user, "Слишком короткое резюме.")
+        if len(text) < 50 or not looks_like_resume(text):
+            if not user.onboarded or file_id is None:
+                self._awaiting[user.id] = "resume"
+            await self.reply(
+                user,
+                "Это не похоже на резюме 🤔 Пришлите PDF или текст с опытом и навыками.",
+            )
             return
-        limit = self.billing.plan(user).max_resumes
-        if self._resume_count(user) >= limit:
-            extra = f" В 💎 Pro — до {PRO.max_resumes}." if limit < PRO.max_resumes else ""
-            await self.reply(user, f"Уже {limit} резюме — удалите лишнее в 📄 Резюме.{extra}")
-            return
-        resume_id = self.db.add_resume(user.id, title, text, file_id=file_id, file_name=file_name)
-        resume = self.db.get_resume(user.id, resume_id)
-        assert resume is not None
-        if self.on_resume:
-            await self.reply(user, f"⏳ Читаю «{escape(title)}»…")
-            await self.reply(user, await self.on_resume(user, resume))
+        summary = ""
+        resume = self.db.find_resume(user.id, text)
+        if resume is not None:
+            # тот же файл ещё раз — не плодим копии
+            await self.reply(user, f"Это резюме уже загружено: «{escape(resume.title)}».")
+            summary = _summary(resume)
         else:
-            await self.reply(user, f"✅ Резюме «{escape(title)}» сохранено.")
+            limit = self.billing.plan(user).max_resumes
+            if self._resume_count(user) >= limit:
+                extra = f" В 💎 Pro — до {PRO.max_resumes}." if limit < PRO.max_resumes else ""
+                await self.reply(user, f"Уже {limit} резюме — удалите лишнее в 📄 Резюме.{extra}")
+                return
+            resume_id = self.db.add_resume(
+                user.id, title, text, file_id=file_id, file_name=file_name
+            )
+            resume = self.db.get_resume(user.id, resume_id)
+            assert resume is not None
+            if self.on_resume:
+                summary = await self._read_resume(user, resume)
+            else:
+                await self.reply(user, f"✅ Резюме «{escape(title)}» сохранено.")
         understood = self.on_resume and not self.db.get_profile(user.id).is_empty
         if not user.onboarded:
             self._profile_mode[user.id] = "ob"
             if understood:
                 # сначала человек проверяет и правит то, что понял ИИ, потом — вопросы
                 self._apply_profile(user)
-                await self.show_profile(user, title="👤 Вот что я понял из резюме")
+                await self.show_profile(user, title="👤 Вот что я понял из резюме", summary=summary)
             else:
                 await self._ask_next(user)
         elif understood:
             self._apply_profile(user)
-            await self.show_profile(user, title="👤 Профиль дополнен из резюме")
+            await self.show_profile(user, title="👤 Профиль дополнен из резюме", summary=summary)
+
+    async def _read_resume(self, user: User, resume: Resume) -> str:
+        """Разбор резюме ИИ. Удалось — краткое содержание для карточки профиля (её
+        покажет вызывающий, одним сообщением); нет — ответ ИИ-модуля уходит как есть."""
+        assert self.on_resume is not None
+        await self.reply(user, f"⏳ Читаю «{escape(resume.title)}»…")
+        answer = await self.on_resume(user, resume)
+        parsed = self.db.get_resume(user.id, resume.id)
+        if parsed is None or not parsed.profile:
+            await self.reply(user, answer)
+            return ""
+        return _summary(parsed)
 
     # --- текстовый ввод -------------------------------------------------------
 
@@ -1511,6 +1682,7 @@ class Bot:
             "src": self._cb_sources_legacy,
             "del": self._cb_delete_data,
             "nt": self._cb_notify,
+            "back": self._cb_comeback,
         }.get(prefix)
         if handler:
             await handler(user, cb, value, msg)
@@ -1536,6 +1708,35 @@ class Bot:
         if msg:
             text, markup = self._resumes_view(user)
             await self.edit(msg, text, markup)
+
+    async def _cb_comeback(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        """«С возвращением»: продолжить с прежними настройками или начать заново."""
+        await self.api.answer_callback(cb["id"])
+        if value == "keep":
+            self.db.set_stopped(user.id, False)
+            self.db.set_paused(user.id, False)
+            user.stopped_at, user.paused = None, False
+            if msg:
+                await self.edit(msg, "▶️ Продолжаем с прежними настройками.", None)
+            await self.cmd_start(user, "")
+        elif value == "reset":
+            await self.reset_setup(user)
+            if msg:
+                await self.edit(msg, "🔄 Начинаем заново — прежние настройки стёрты.", None)
+            await self.cmd_start(user, "")
+        elif value == "cancel" and msg:
+            await self.edit(msg, "Оставили всё как есть.", None)
+
+    async def cmd_reset(self, user: User, args: str) -> None:
+        await self.reply(
+            user,
+            "<b>🔄 Настроить поиск заново?</b>\n\n"
+            "Сотру резюме, профиль и фильтры и задам вопросы с начала. "
+            "Подписка и история вакансий сохранятся.",
+            inline_keyboard(
+                [button("🔄 Да, заново", data="back:reset"), button("Отмена", data="back:cancel")]
+            ),
+        )
 
     async def _cb_onboarding(self, user: User, cb: dict, value: str, msg: dict) -> None:
         await self.api.answer_callback(cb["id"])
@@ -1659,10 +1860,9 @@ class Bot:
             resumes = self.db.get_resumes(user.id)
             if not resumes:
                 return
-            await self.reply(user, f"⏳ Перечитываю «{escape(resumes[-1].title)}»…")
-            await self.reply(user, await self.on_resume(user, resumes[-1]))
+            summary = await self._read_resume(user, resumes[-1])
             self._apply_profile(user)
-            await self.show_profile(user)
+            await self.show_profile(user, summary=summary)
 
     async def _cb_stats(self, user: User, cb: dict, value: str, msg: dict) -> None:
         await self.api.answer_callback(cb["id"])
@@ -1793,3 +1993,12 @@ class Bot:
 
 
 _PRESET_QUERIES = {q for _, q in r.DIRECTIONS.values()}
+
+
+def _summary(resume: Resume) -> str:
+    """Краткое содержание из разбора резюме (для карточки профиля)."""
+    try:
+        data = json.loads(resume.profile) if resume.profile else {}
+    except ValueError:
+        return ""
+    return str(data.get("summary") or "")[:400] if isinstance(data, dict) else ""
