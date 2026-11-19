@@ -28,7 +28,10 @@ class FakeTelegram:
         if "/file/" in request.url.path:
             return httpx.Response(200, content=self.files[request.url.path.rsplit("/", 1)[-1]])
         method = request.url.path.rsplit("/", 1)[-1]
-        payload = json.loads(request.content or b"{}")
+        if request.headers.get("content-type", "").startswith("multipart/"):
+            payload = {"multipart": request.read().decode("latin-1")}
+        else:
+            payload = json.loads(request.content or b"{}")
         self.calls.append((method, payload))
         if method == "getFile":
             fid = payload["file_id"]
