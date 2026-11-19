@@ -15,8 +15,11 @@ from jobspybot.sources import REGISTRY, SourceUnavailable, build_sources
 log = logging.getLogger("jobspybot")
 
 
-async def check_sources(settings: Settings, query: str) -> int:
-    """Диагностика: прогнать поиск по всем площадкам и показать результат."""
+async def check_sources(settings: Settings, query: str, *, strict: bool = False) -> int:
+    """Диагностика: прогнать поиск по всем площадкам и показать результат.
+
+    `strict` — пустая выдача тоже считается сбоем: так обычно ломается вёрстка площадки.
+    """
     http = Http(user_agent=settings.user_agent, timeout=settings.http_timeout)
     sources = build_sources(http, settings)
     skipped = sorted(set(REGISTRY) - set(sources))
@@ -36,6 +39,9 @@ async def check_sources(settings: Settings, query: str) -> int:
                 print(f"[{name}] ошибка: {exc!r}")
                 continue
             print(f"[{name}] найдено {len(found)}")
+            if strict and not found:
+                failed += 1
+                print(f"[{name}] пустая выдача")
             for v in found[:3]:
                 print(f"    {v.title} — {v.company} ({v.location}) {v.salary_text()}  {v.url}")
     finally:
@@ -50,6 +56,7 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("run", help="запустить бота (по умолчанию)")
     chk = sub.add_parser("check-sources", help="проверить работу площадок")
     chk.add_argument("query", nargs="?", default="python")
+    chk.add_argument("--strict", action="store_true", help="пустая выдача площадки — тоже ошибка")
     args = parser.parse_args(argv)
 
     try:
@@ -67,7 +74,7 @@ def main(argv: list[str] | None = None) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     if args.cmd == "check-sources":
-        sys.exit(asyncio.run(check_sources(settings, args.query)))
+        sys.exit(asyncio.run(check_sources(settings, args.query, strict=args.strict)))
 
     from jobspybot.admin_web import Runtime
     from jobspybot.app import run
