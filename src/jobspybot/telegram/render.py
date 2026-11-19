@@ -54,6 +54,9 @@ LEVEL_BUTTONS = {
 }
 
 
+FORMAT_BADGES = {"remote": "🏠 удалённо", "hybrid": "🔀 гибрид", "office": "🏢 офис"}
+
+
 def vacancy_card(v: Vacancy, extra: str = "") -> str:
     lines = [f'<b><a href="{escape(v.url, quote=True)}">{escape(v.title)}</a></b>']
     where = " · ".join(
@@ -62,7 +65,8 @@ def vacancy_card(v: Vacancy, extra: str = "") -> str:
             [
                 f"🏢 {escape(v.company)}" if v.company else "",
                 f"📍 {escape(v.location)}" if v.location else "",
-                "🏠 удалённо" if v.remote else "",
+                *[FORMAT_BADGES[f] for f in v.work_formats if f in FORMAT_BADGES],
+                "🏠 удалённо" if v.remote and not v.work_formats else "",
             ],
         )
     )
@@ -79,6 +83,8 @@ def vacancy_card(v: Vacancy, extra: str = "") -> str:
     )
     if meta:
         lines.append(meta)
+    if v.address:
+        lines.append(f"🗺 {escape(v.address)}")
     source = REGISTRY[v.source].title if v.source in REGISTRY else v.source
     date = v.published_at.strftime("%d.%m") if v.published_at else ""
     lines.append(f"🔎 {escape(source)}{' · ' + date if date else ''}")
@@ -207,11 +213,14 @@ def profile_card(p: UserProfile, queries: list[str], *, title: str = "👤 Пр�
         f"🧩 Навыки: {_list(p.skills[:15], unknown)}",
         f"🗣 Языки: {_list(p.languages, unknown)}",
         f"📍 Живу: {escape(place) if place else unknown} · гражданство {escape(p.citizenship)}",
-        f"🏢 Формат: {escape(formats) if formats else unknown}",
+        f"🏢 Формат: {escape(formats) if formats else unknown}"
+        + (f" · только г. {escape(p.city)}" if p.only_home_city and p.city else ""),
         f"✈️ Релокация: {reloc}",
         f"💰 Ожидания: {salary}",
         f"🔍 Ищу: {_list(queries or p.directions, unknown)}",
     ]
+    if p.wishes:
+        lines.append(f"📝 Пожелания: {escape(p.wishes)}")
     return "\n".join(lines)
 
 

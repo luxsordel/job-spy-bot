@@ -15,10 +15,13 @@ from jobspybot.db import Database, Resume, User, utcnow
 from jobspybot.filters import COUNTRIES, UserFilters
 from jobspybot.models import Level, Vacancy
 from jobspybot.profile import (
+    PATCH_KEYS,
     RELOCATION_COUNTRIES,
     SALARY_PRESETS,
     WORK_FORMATS,
+    apply_patch,
     apply_to_filters,
+    preview_patch,
 )
 from jobspybot.resume_files import (
     MAX_FILE_BYTES,
@@ -62,6 +65,7 @@ _SPLIT = re.compile(r"[;,\n]+")
 MAX_RESUME_CHARS = 8000
 
 ResumeHook = Callable[[User, Resume], Awaitable[str]]
+EditHook = Callable[[User, str], Awaitable[dict[str, Any] | None]]
 CallbackHook = Callable[[User, dict[str, Any], str], Awaitable[None]]
 
 
@@ -97,6 +101,9 @@ class Bot:
         self.on_resume: ResumeHook | None = None
         #: дополнительные кнопки под вакансией: префикс → (текст, обработчик)
         self.extra_buttons: dict[str, tuple[str, CallbackHook]] = {}
+        #: разбор фразы «хочу только гибрид…» в правку профиля (подключается модулем ИИ)
+        self.on_profile_edit: EditHook | None = None
+        self._pending_patch: dict[int, dict[str, Any]] = {}
         self._menu_actions: dict[str, Callable[[User], Awaitable[None]]] = {
             r.BTN_SEARCH: self.show_search,
             r.BTN_RESUMES: self.show_resumes,
@@ -261,6 +268,10 @@ class Bot:
 
         handler = getattr(self, f"cmd_{cmd}", None) if cmd else None
         if handler is None:
+            if not cmd and self.on_profile_edit and len(text) >= 6:
+                # обычная фраза — это просьба что-то поменять в поиске
+                await self._nl_edit(user, text)
+                return
             await self.reply(
                 user,
                 "Не понял 🤔 Выберите раздел в меню ниже или пришлите PDF резюме.",
@@ -437,11 +448,14 @@ class Bot:
                 button("🎓 Уровень", data="pe:level"),
             ],
             [
-                button("🏢 Формат", data="pe:work_formats"),
+                button("🏢 Формат и город", data="pe:fmtcity"),
                 button("✈️ Релокация", data="pe:relocation"),
             ],
             [button("💰 Зарплата", data="pe:salary"), button("🧩 Навыки", data="pe:skills")],
+            [button("📝 Пожелания", data="pe:wishes")],
         ]
+        if self.on_profile_edit:
+            rows.append([button("✍️ Изменить словами", data="pe:nl")])
         if missing:
             rows.insert(0, [button(f"✍️ Дозаполнить ({len(missing)})", data="pe:fill_missing")])
         if self.on_resume and self.db.get_resumes(user.id):
@@ -453,6 +467,142 @@ class Bot:
             await self.reply(user, text, markup)
 
     async def cmd_profile(self, user: User, args: str) -> None:
+        await self.show_profile(user)
+
+    # --- формат и город -------------------------------------------------------
+
+    def _fmtcity_view(self, user: User) -> tuple[str, dict[str, Any]]:
+        p = self.db.get_profile(user.id)
+        city = p.city or "не указан"
+        rows = [
+            [
+                button(f"{'✅ ' if k in p.work_formats else ''}{label}", data=f"pf:fmt:{k}")
+                for k, label in WORK_FORMATS.items()
+            ],
+            [
+                button(
+                    f"{'✅' if p.only_home_city else '▫️'} Офис и гибрид только в г. {city}"[:60],
+                    data="pf:city",
+                )
+            ],
+            [button("🏙 Сменить город", data="pf:setcity")],
+            [
+                button(
+                    f"{'✅' if p.strict_format else '▫️'} Скрывать вакансии без формата",
+                    data="pf:strict",
+                )
+            ],
+            [button("⬅️ К профилю", data="pe:show")],
+        ]
+        text = (
+            "<b>🏢 Формат и город</b>\n\n"
+            "Отметьте подходящие форматы. «Только мой город» убирает офис и гибрид в других "
+            "городах вашей страны — удалёнка и релокация остаются.\n\n"
+            "Район или метро напишите в 📝 Пожеланиях — ИИ сверит их с адресом вакансии."
+        )
+        return text, inline_keyboard(*rows)
+
+    async def show_fmtcity(self, user: User, msg: dict[str, Any] | None = None) -> None:
+        text, markup = self._fmtcity_view(user)
+        if msg:
+            await self.edit(msg, text, markup)
+        else:
+            await self.reply(user, text, markup)
+
+    async def _cb_fmtcity(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        action, _, arg = value.partition(":")
+        p = self.db.get_profile(user.id)
+        note = None
+        if action == "fmt" and arg in WORK_FORMATS:
+            formats = (
+                [x for x in p.work_formats if x != arg]
+                if arg in p.work_formats
+                else [
+                    *p.work_formats,
+                    arg,
+                ]
+            )
+            if not formats:
+                note = "Нужен хотя бы один формат"
+            else:
+                p.work_formats = [k for k in WORK_FORMATS if k in formats]
+                p.mark("work_formats")
+        elif action == "city":
+            if not p.city:
+                self._awaiting[user.id] = "city_pq"
+                await self.api.answer_callback(cb["id"])
+                await self.reply(user, "🏙 В каком городе вы живёте?")
+                return
+            p.only_home_city = not p.only_home_city
+        elif action == "setcity":
+            self._awaiting[user.id] = "city_pq"
+            await self.api.answer_callback(cb["id"])
+            await self.reply(user, "🏙 Напишите город, например <b>Минск</b>.")
+            return
+        elif action == "strict":
+            p.strict_format = not p.strict_format
+        self.db.save_profile(user.id, p)
+        self._apply_profile(user)
+        await self.api.answer_callback(cb["id"], note)
+        await self.show_fmtcity(user, msg or None)
+
+    # --- правка словами -------------------------------------------------------
+
+    async def _nl_edit(self, user: User, text: str) -> None:
+        if not self.on_profile_edit:
+            await self.reply(user, "Не понял 🤔 Выберите раздел в меню ниже.", main_menu())
+            return
+        patch = await self.on_profile_edit(user, text)
+        if patch is None:
+            await self.reply(
+                user, "ИИ сейчас недоступен — поменяйте настройки кнопками в 👤 Профиль."
+            )
+            return
+        patch = {k: v for k, v in patch.items() if k in PATCH_KEYS or k == "unclear"}
+        profile = self.db.get_profile(user.id)
+        lines = preview_patch(
+            profile, user.filters, patch, max_queries=self.billing.plan(user).max_queries
+        )
+        if not lines:
+            unclear = str(patch.get("unclear") or "").strip()
+            await self.reply(
+                user,
+                (
+                    f"Не совсем понял: {escape(unclear)}\n\n"
+                    if unclear
+                    else "Не понял, что поменять 🤔\n\n"
+                )
+                + "Напишите, например: <i>только гибрид в Минске, во Фрунзенском районе, "
+                "от 1000$</i> — или поменяйте кнопками в 👤 Профиль.",
+            )
+            return
+        self._pending_patch[user.id] = patch
+        await self.reply(
+            user,
+            "<b>Понял так:</b>\n" + "\n".join(f"• {escape(x)}" for x in lines) + "\n\nПрименить?",
+            inline_keyboard(
+                [button("✅ Применить", data="nl:apply"), button("✖️ Отмена", data="nl:cancel")]
+            ),
+        )
+
+    async def _cb_nl(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        patch = self._pending_patch.pop(user.id, None)
+        if value != "apply" or patch is None:
+            await self.api.answer_callback(cb["id"], "Отменено" if value == "cancel" else None)
+            if msg:
+                await self.api.edit_reply_markup(msg["chat"]["id"], msg["message_id"], None)
+            return
+        profile = self.db.get_profile(user.id)
+        lines = apply_patch(
+            profile, user.filters, patch, max_queries=self.billing.plan(user).max_queries
+        )
+        self.db.save_profile(user.id, profile)
+        self.db.save_filters(user.id, user.filters)
+        await self.api.answer_callback(cb["id"], "Готово")
+        if msg:
+            await self.edit(
+                msg, "✅ <b>Применено:</b>\n" + "\n".join(f"• {escape(x)}" for x in lines), None
+            )
         await self.show_profile(user)
 
     # --- выборки (общие для анкеты и фильтров) -------------------------------
@@ -555,7 +705,7 @@ class Bot:
             ],
             [
                 button("🌍 Страны", data="f:cty"),
-                button(f"🏠 Удалёнка: {'да' if f.remote_only else 'нет'}", data="f:remote"),
+                button("🏢 Формат и город", data="pe:fmtcity"),
             ],
             [
                 button(
@@ -876,6 +1026,23 @@ class Bot:
         if field == "resume":
             await self._save_resume(user, text, title=f"Резюме {self._resume_count(user) + 1}")
             return
+        if field == "city_pq":
+            profile = self.db.get_profile(user.id)
+            profile.city = text.strip()[:40]
+            profile.only_home_city = True
+            self.db.save_profile(user.id, profile)
+            self._apply_profile(user)
+            await self.show_fmtcity(user)
+            return
+        if field == "wishes_pq":
+            profile = self.db.get_profile(user.id)
+            profile.wishes = "" if text.strip() == "-" else text.strip()[:300]
+            self.db.save_profile(user.id, profile)
+            await self.show_profile(user)
+            return
+        if field == "nl":
+            await self._nl_edit(user, text)
+            return
         if field == "queries_pq":
             for q in parse_list(text):
                 if err := self._toggle_query(user, q, add_only=True):
@@ -1075,6 +1242,8 @@ class Bot:
             "pq": self._cb_question,
             "pe": self._cb_profile,
             "st": self._cb_stats,
+            "pf": self._cb_fmtcity,
+            "nl": self._cb_nl,
             "f": self._cb_filters,
             "plan": self._cb_plan,
             "sub": self._cb_subscription,
@@ -1190,6 +1359,25 @@ class Bot:
                 user,
                 f"🧩 Сейчас: {escape(', '.join(profile.skills)) or '—'}\n\n"
                 "Напишите навыки через запятую — по ним вакансии отбираются бесплатно, до ИИ.",
+            )
+        elif value == "fmtcity":
+            await self.show_fmtcity(user, msg or None)
+        elif value == "wishes":
+            profile = self.db.get_profile(user.id)
+            self._awaiting[user.id] = "wishes_pq"
+            await self.reply(
+                user,
+                f"📝 Сейчас: {escape(profile.wishes) or '—'}\n\n"
+                "Напишите пожелания, которые не влезают в кнопки: район, метро, график, "
+                "тип компании… Например: <i>Фрунзенский район или рядом с м. Пушкинская, "
+                "без ночных смен</i>. ИИ учтёт это при оценке. «-» — очистить.",
+            )
+        elif value == "nl":
+            self._awaiting[user.id] = "nl"
+            await self.reply(
+                user,
+                "✍️ Напишите, что поменять, своими словами. Например:\n"
+                "<i>хочу только гибрид в Минске, во Фрунзенском районе, от 1000$</i>",
             )
         elif value == "fill_missing":
             self._profile_mode[user.id] = "fill"

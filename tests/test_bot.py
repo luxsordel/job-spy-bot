@@ -482,3 +482,72 @@ def paid(user_id: int, charge: str, *, first: bool) -> dict:
         "subscription_expiration_date": int((datetime.now(UTC) + timedelta(days=30)).timestamp()),
     }
     return update
+
+
+async def test_format_and_city_screen(bot, tg, db):
+    onboarded_user(db, ADMIN)
+    await bot.handle_update(callback(ADMIN, "pe:fmtcity"))
+    assert "Формат и город" in shown(tg)
+    await bot.handle_update(callback(ADMIN, "pf:fmt:hybrid"))
+    await bot.handle_update(callback(ADMIN, "pf:city"))  # города нет — спросит
+    await bot.handle_update(message(ADMIN, "Минск"))
+    await bot.handle_update(callback(ADMIN, "pf:strict"))
+    p, f = db.get_profile(ADMIN), db.get_user(ADMIN).filters
+    assert p.work_formats == ["hybrid"] and p.city == "Минск" and p.only_home_city
+    assert f.formats == ["hybrid"] and f.only_home_city and f.home_city == "Минск"
+    assert f.strict_format
+    await bot.handle_update(callback(ADMIN, "pf:fmt:hybrid"))  # последний формат не снять
+    assert db.get_profile(ADMIN).work_formats == ["hybrid"]
+
+
+async def test_wishes(bot, tg, db):
+    onboarded_user(db, ADMIN)
+    await bot.handle_update(callback(ADMIN, "pe:wishes"))
+    await bot.handle_update(message(ADMIN, "Фрунзенский район, без ночных смен"))
+    assert db.get_profile(ADMIN).wishes == "Фрунзенский район, без ночных смен"
+    assert "Пожелания" in tg.texts(ADMIN)[-1]
+
+
+async def test_free_text_edit_with_confirmation(bot, tg, db):
+    onboarded_user(db, ADMIN, queries=["python developer"])
+    profile = db.get_profile(ADMIN)
+    profile.city, profile.country, profile.work_formats = "Минск", "BY", ["remote", "office"]
+    db.save_profile(ADMIN, profile)
+
+    async def fake_parse(user, text):
+        if "непонятно" in text:
+            return {"unclear": "о каком городе речь"}
+        return {"work_formats": ["hybrid"], "only_home_city": True, "wishes": "Фрунзенский район"}
+
+    bot.on_profile_edit = fake_parse
+    await bot.handle_update(message(ADMIN, "хочу только гибрид во Фрунзенском районе"))
+    assert "Понял так" in tg.texts(ADMIN)[-1] and "Гибрид" in tg.texts(ADMIN)[-1]
+    assert db.get_profile(ADMIN).work_formats == ["remote", "office"]  # ещё не применено
+    await bot.handle_update(callback(ADMIN, "nl:apply"))
+    p, f = db.get_profile(ADMIN), db.get_user(ADMIN).filters
+    assert p.work_formats == ["hybrid"] and p.wishes == "Фрунзенский район"
+    assert f.formats == ["hybrid"] and f.only_home_city
+
+    await bot.handle_update(message(ADMIN, "сделай непонятно что"))
+    assert "о каком городе речь" in tg.texts(ADMIN)[-1]
+    await bot.handle_update(message(ADMIN, "только офис"))
+    await bot.handle_update(callback(ADMIN, "nl:cancel"))
+    assert db.get_profile(ADMIN).work_formats == ["hybrid"]
+
+
+async def test_vacancy_card_shows_format_and_address(bot, tg, db):
+    onboarded_user(db, ADMIN)
+    v = Vacancy(
+        source="habr",
+        external_id="2",
+        title="Dev",
+        url="https://x/2",
+        location="Минск",
+        work_formats=("hybrid",),
+        address="ул. Притыцкого, 29 (м. Пушкинская)",
+    )
+    db.save_vacancies([v])
+    db.record(ADMIN, v, "sent")
+    await bot.send_vacancy(db.get_user(ADMIN), v, db.delivery_id(ADMIN, v.uid))
+    text = tg.calls[-1][1]["text"]
+    assert "🔀 гибрид" in text and "м. Пушкинская" in text
