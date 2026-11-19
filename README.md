@@ -148,6 +148,21 @@ journalctl -u job-spy-bot -f
 (виртуальное окружение там же). Данные лежат в `/var/lib/job-spy-bot`, конфиг — в `/etc/job-spy-bot/env`.
 Обновление: тот же скрипт ещё раз.
 
+### Если репозиторий приватный
+
+Ссылка `raw.githubusercontent.com` вернёт 404. Выдайте серверу ключ только для чтения:
+
+```bash
+ssh-keygen -t ed25519 -N "" -f /root/.ssh/jobspy_deploy -C jobspy-server
+cat /root/.ssh/jobspy_deploy.pub      # добавьте в Settings → Deploy keys (без Write access)
+printf 'Host github.com\n  HostName ssh.github.com\n  Port 443\n  User git\n  IdentityFile /root/.ssh/jobspy_deploy\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n' > /root/.ssh/config
+git clone git@github.com:luxsordel/job-spy-bot.git /root/jsb-src
+REPO=git@github.com:luxsordel/job-spy-bot.git bash /root/jsb-src/deploy/install.sh
+```
+
+Порт 443 вместо 22 нужен, потому что многие хостеры закрывают исходящий SSH на GitHub.
+Обновление: повторить последнюю команду.
+
 Сервис ограничен `MemoryMax=160M` и работает в песочнице systemd. `MALLOC_ARENA_MAX=2`
 уменьшает фрагментацию памяти glibc.
 
