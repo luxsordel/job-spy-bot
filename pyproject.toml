@@ -8,7 +8,6 @@ version = "1.0.0"
 description = "Telegram-бот для мониторинга вакансий в BY / RU / KZ / GE / PL с ИИ-анализом"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
 authors = [{ name = "luxsordel" }]
 # Зависимости намеренно минимальны: бот должен жить на VPS с маленьким объёмом RAM.
 dependencies = [
