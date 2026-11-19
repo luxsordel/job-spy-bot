@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from jobspybot.filters import UserFilters
-from jobspybot.profile import UserProfile, apply_to_filters
+from jobspybot.profile import UserProfile, apply_patch, apply_to_filters, remember_override
 
 EXTRACTED = {
     "name": "Владимир",
@@ -128,3 +128,64 @@ def test_patch_from_phrase():
     assert f.queries == ["python developer", "backend developer"]
     assert f.exclude == ["senior"]
     assert "Фрунзенский район" in p.context_line()
+
+
+def test_several_levels_and_any_level():
+    p = UserProfile(level="junior")
+    assert p.target_levels() == ["intern", "junior"]  # из резюме — диапазон
+    p.toggle_level("middle")
+    p.toggle_level("intern")
+    assert p.levels == ["junior", "middle"] and p.target_levels() == ["junior", "middle"]
+    f = UserFilters()
+    apply_to_filters(p, f, max_queries=3)
+    assert f.levels == ["junior", "middle"]
+    # снять все — значит «любой уровень», а не откат к уровню из резюме
+    p.set_levels([])
+    apply_to_filters(p, f, max_queries=3)
+    assert f.levels == [] and p.missing(f).count("level") == 0
+    restored = UserProfile.from_json(p.to_json())
+    assert restored.target_levels() == []
+
+
+def test_patch_levels_from_phrase():
+    p, f = UserProfile(level="junior"), UserFilters()
+    apply_patch(p, f, {"levels": ["Middle", "junior", "god"]}, max_queries=3)
+    assert f.levels == ["junior", "middle"]
+    apply_patch(p, f, {"level": "senior"}, max_queries=3)
+    assert f.levels == ["middle", "senior"]
+
+
+def test_patch_rejects_unrealistic_salary():
+    p, f = UserProfile(salary_usd=1000), UserFilters()
+    changes = apply_patch(p, f, {"salary_usd": 10**40}, max_queries=3)
+    assert p.salary_usd == 1000 and not any("зарплата" in c for c in changes)
+    apply_patch(p, f, {"salary_usd": "1e400"}, max_queries=3)
+    assert p.salary_usd == 1000
+
+
+def test_manual_filter_edit_survives_profile_changes():
+    """Снятая в фильтрах страна не возвращается от правки, не связанной со странами."""
+    p = UserProfile(
+        country="BY",
+        work_formats=["office", "remote"],
+        relocation=True,
+        relocation_countries=["PL", "GE"],
+        salary_usd=1000,
+    )
+    f = UserFilters()
+    apply_to_filters(p, f, max_queries=3)
+    assert f.countries == ["BY", "PL", "GE", "REMOTE"] and f.min_salary_usd == 800
+    f.countries = ["BY", "PL", "REMOTE"]
+    f.min_salary_usd = 1500
+    remember_override(p, f, "countries")
+    remember_override(p, f, "min_salary_usd")
+    p.wishes = "без ночных смен"
+    apply_to_filters(p, f, max_queries=3)
+    assert f.countries == ["BY", "PL", "REMOTE"] and f.min_salary_usd == 1500
+    # сменилась основа — релокация: страны снова выводятся из профиля
+    p.relocation_countries = ["PL"]
+    apply_to_filters(p, f, max_queries=3)
+    assert f.countries == ["BY", "PL", "REMOTE"] and "countries" not in p.overrides
+    p.salary_usd = 2000
+    apply_to_filters(p, f, max_queries=3)
+    assert f.min_salary_usd == 1600

@@ -13,6 +13,13 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 from jobspybot.filters import COUNTRIES, UserFilters
+from jobspybot.limits import (
+    MAX_CITY_LEN,
+    MAX_WISHES_LEN,
+    clean_list,
+    clean_text,
+    safe_salary,
+)
 from jobspybot.models import Level
 
 WORK_FORMATS = {"remote": "🏠 Удалёнка", "hybrid": "🔀 Гибрид", "office": "🏢 Офис"}
@@ -29,6 +36,8 @@ LEVEL_RANGE = {
     Level.LEAD.value: [Level.SENIOR.value, Level.LEAD.value],
 }
 
+LEVEL_ORDER = [lv.value for lv in Level]
+
 #: порядок вопросов анкеты
 QUESTIONS = ("directions", "level", "work_formats", "relocation", "salary")
 
@@ -37,7 +46,9 @@ QUESTIONS = ("directions", "level", "work_formats", "relocation", "salary")
 class UserProfile:
     name: str = ""
     headline: str = ""  # роль одной строкой
-    level: str = ""
+    level: str = ""  # уровень кандидата по резюме
+    #: грейды вакансий, которые показывать (выбирает человек, можно несколько)
+    levels: list[str] = field(default_factory=list)
     experience_years: float | None = None
     skills: list[str] = field(default_factory=list)
     languages: list[str] = field(default_factory=list)
@@ -56,6 +67,9 @@ class UserProfile:
     #: свободные пожелания: район, метро, график… — учитывает ИИ
     wishes: str = ""
     answered: list[str] = field(default_factory=list)  # вопросы, на которые ответил человек
+    #: ручные правки анкеты в ⚙️ Фильтрах поверх выведенного из профиля:
+    #: поле фильтра → [значение из профиля на момент правки, своё значение]
+    overrides: dict[str, list[Any]] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -66,11 +80,35 @@ class UserProfile:
             return cls()
         data = json.loads(raw)
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        profile = cls(**{k: v for k, v in data.items() if k in known})
+        # старые записи могли сохранить мусор (огромную зарплату) — чиним при чтении
+        profile.salary_usd = safe_salary(profile.salary_usd)
+        profile.levels = [lv for lv in LEVEL_ORDER if lv in (profile.levels or [])]
+        if not isinstance(profile.overrides, dict):
+            profile.overrides = {}
+        return profile
 
     @property
     def is_empty(self) -> bool:
-        return not (self.headline or self.skills or self.level)
+        return not (self.headline or self.skills or self.level or self.levels)
+
+    def target_levels(self) -> list[str]:
+        """Грейды вакансий: выбранные человеком или выведенные из уровня по резюме."""
+        if self.levels or "levels" in self.answered:
+            return list(self.levels)
+        return list(LEVEL_RANGE.get(self.level, []))
+
+    def set_levels(self, levels: list[str]) -> None:
+        """Выбор человека; пустой список — любой уровень."""
+        self.levels = [lv for lv in LEVEL_ORDER if lv in levels]
+        self.mark("levels")
+        self.mark("level")
+
+    def toggle_level(self, level: str) -> None:
+        current = self.target_levels()
+        self.set_levels(
+            [x for x in current if x != level] if level in current else [*current, level]
+        )
 
     def mark(self, question: str) -> None:
         if question not in self.answered:
@@ -146,12 +184,9 @@ class UserProfile:
             if relocation and countries and not self.relocation_countries:
                 self.relocation_countries = countries
 
-        try:
-            salary = int(float(data.get("salary_usd")))  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            salary = None
+        salary = safe_salary(data.get("salary_usd"))
         if salary and self.salary_usd is None and "salary" not in self.answered:
-            self.salary_usd = max(0, salary)
+            self.salary_usd = salary
             changed.append("salary_usd")
 
         directions = str_list("directions", 4, item_len=50)
@@ -168,7 +203,7 @@ class UserProfile:
         """Вопросы, которые ещё нужно задать (в порядке анкеты)."""
         unknown = {
             "directions": not (filters.queries or self.directions),
-            "level": not self.level,
+            "level": not (self.level or self.levels),
             "work_formats": not self.work_formats,
             "relocation": self.relocation is None,
             "salary": self.salary_usd is None,
@@ -198,20 +233,20 @@ class UserProfile:
         return "; ".join(parts)
 
 
-def apply_to_filters(p: UserProfile, f: UserFilters, *, max_queries: int) -> None:
-    """Выводит анкету поиска из профиля."""
-    if p.directions and not f.queries:
-        f.queries = p.directions[:max_queries]
-    if p.level in LEVEL_RANGE:
-        f.levels = list(LEVEL_RANGE[p.level])
-
-    countries: list[str] = []
-    f.formats = [x for x in p.work_formats if x in WORK_FORMATS]
-    f.strict_format = p.strict_format
-    f.only_home_city = p.only_home_city
-    f.home_city = p.city
-    f.home_country = p.country or p.citizenship
+def derived_filters(p: UserProfile) -> dict[str, Any]:
+    """Поля анкеты поиска, которые следуют из профиля (только известные)."""
+    out: dict[str, Any] = {
+        "formats": [x for x in p.work_formats if x in WORK_FORMATS],
+        "strict_format": p.strict_format,
+        "only_home_city": p.only_home_city,
+        "home_city": p.city,
+        "home_country": p.country or p.citizenship,
+    }
+    levels = p.target_levels()
+    if levels or "levels" in p.answered:
+        out["levels"] = levels
     if p.work_formats:
+        countries: list[str] = []
         if {"office", "hybrid"} & set(p.work_formats):
             home = p.country or p.citizenship
             if home in COUNTRIES:
@@ -220,11 +255,47 @@ def apply_to_filters(p: UserProfile, f: UserFilters, *, max_queries: int) -> Non
             countries += [c for c in p.relocation_countries if c not in countries]
         if "remote" in p.work_formats:
             countries.append("REMOTE")
-        f.countries = countries
-        f.remote_only = p.work_formats == ["remote"]
+        out["countries"] = countries
+        out["remote_only"] = p.work_formats == ["remote"]
     if p.salary_usd is not None:
         # чуть ниже ожиданий: вилки часто занижены, а торг возможен
-        f.min_salary_usd = int(p.salary_usd * 0.8)
+        out["min_salary_usd"] = p.salary_usd * 4 // 5
+    return out
+
+
+#: поля, которые можно поменять в ⚙️ Фильтрах поверх профиля
+OVERRIDABLE = ("countries", "remote_only", "min_salary_usd")
+
+
+def apply_to_filters(p: UserProfile, f: UserFilters, *, max_queries: int) -> None:
+    """Выводит анкету поиска из профиля.
+
+    Ручная правка в фильтрах (`remember_override`) сохраняется, пока не поменяется то,
+    из чего поле выводится: снятая страна не вернётся от правки зарплаты, но вернётся,
+    если человек сам изменит релокацию или формат.
+    """
+    if p.directions and not f.queries:
+        f.queries = p.directions[:max_queries]
+    for name, auto in derived_filters(p).items():
+        saved = p.overrides.get(name)
+        if saved is not None and saved[0] == auto:
+            value = saved[1]
+        else:
+            p.overrides.pop(name, None)
+            value = auto
+        setattr(f, name, copy.deepcopy(value))
+
+
+def remember_override(p: UserProfile, f: UserFilters, name: str) -> None:
+    """Запоминает ручную правку поля фильтров, чтобы профиль её не перетёр."""
+    auto = derived_filters(p).get(name)
+    if name not in OVERRIDABLE or auto is None:
+        return
+    value = getattr(f, name)
+    if value == auto:
+        p.overrides.pop(name, None)
+    else:
+        p.overrides[name] = [auto, copy.deepcopy(value)]
 
 
 #: какие ключи может вернуть ИИ при разборе фразы «хочу только гибрид…»
@@ -234,6 +305,7 @@ PATCH_KEYS = (
     "strict_format",
     "city",
     "level",
+    "levels",
     "relocation",
     "relocation_countries",
     "salary_usd",
@@ -252,11 +324,7 @@ def apply_patch(
 
     def str_list(key: str) -> list[str]:
         value = patch.get(key) or []
-        return (
-            [str(x).strip()[:60] for x in value if str(x).strip()]
-            if isinstance(value, list)
-            else []
-        )
+        return clean_list(value) if isinstance(value, list) else []
 
     if "work_formats" in patch:
         formats = [x for x in str_list("work_formats") if x in WORK_FORMATS]
@@ -265,7 +333,7 @@ def apply_patch(
             p.mark("work_formats")
             changes.append("формат: " + ", ".join(WORK_FORMATS[x] for x in formats))
     if isinstance(patch.get("city"), str) and patch["city"].strip():
-        p.city = patch["city"].strip()[:40]
+        p.city = clean_text(patch["city"], MAX_CITY_LEN)
         changes.append(f"город: {p.city}")
     if isinstance(patch.get("only_home_city"), bool):
         p.only_home_city = patch["only_home_city"]
@@ -276,11 +344,14 @@ def apply_patch(
         changes.append(
             "скрывать вакансии без формата" if p.strict_format else "показывать без формата"
         )
+    levels = [x.lower() for x in str_list("levels") if x.lower() in LEVEL_RANGE]
     level = str(patch.get("level") or "").lower()
-    if level in LEVEL_RANGE:
+    if not levels and level in LEVEL_RANGE:
         p.level = level
-        p.mark("level")
-        changes.append(f"уровень: {level}")
+        levels = LEVEL_RANGE[level]
+    if levels:
+        p.set_levels(levels)
+        changes.append("уровни: " + ", ".join(p.levels))
     if isinstance(patch.get("relocation"), bool):
         p.relocation = patch["relocation"]
         p.mark("relocation")
@@ -293,14 +364,13 @@ def apply_patch(
         p.mark("relocation")
         changes.append("релокация: " + ", ".join(countries))
     if "salary_usd" in patch:
-        try:
-            p.salary_usd = max(0, int(float(patch["salary_usd"])))
+        salary = safe_salary(patch["salary_usd"])
+        if salary is not None:
+            p.salary_usd = salary
             p.mark("salary")
             changes.append(f"зарплата от {p.salary_usd}$" if p.salary_usd else "зарплата не важна")
-        except (TypeError, ValueError):
-            pass
     if isinstance(patch.get("wishes"), str):
-        p.wishes = patch["wishes"].strip()[:300]
+        p.wishes = clean_text(patch["wishes"], MAX_WISHES_LEN)
         changes.append(f"пожелания: {p.wishes}" if p.wishes else "пожелания очищены")
 
     apply_to_filters(p, f, max_queries=max_queries)
@@ -320,7 +390,7 @@ def apply_patch(
         changes.append(f"не влезло по тарифу: {', '.join(added[room:])}")
     stop = [w for w in str_list("exclude_add") if w.lower() not in {x.lower() for x in f.exclude}]
     if stop:
-        f.exclude = [*f.exclude, *stop]
+        f.exclude = clean_list([*f.exclude, *stop])
         changes.append("стоп-слова: " + ", ".join(stop))
     return changes
 
