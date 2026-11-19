@@ -90,3 +90,41 @@ def test_context_line():
     line = p.context_line()
     assert "гражданство BY" in line and "релокации (PL)" in line and "1200$" in line
     assert UserProfile.from_json(p.to_json()) == p
+
+
+def test_apply_to_filters_sets_formats_and_city():
+    p = UserProfile(
+        city="Минск", country="BY", work_formats=["hybrid"], only_home_city=True, strict_format=True
+    )
+    f = UserFilters()
+    apply_to_filters(p, f, max_queries=5)
+    assert f.formats == ["hybrid"] and f.strict_format
+    assert (f.only_home_city, f.home_city, f.home_country) == (True, "Минск", "BY")
+    assert f.countries == ["BY"]
+
+
+def test_patch_from_phrase():
+    from jobspybot.profile import apply_patch, preview_patch
+
+    p = UserProfile(city="Минск", country="BY", work_formats=["remote", "office"])
+    f = UserFilters(queries=["python developer"])
+    patch = {
+        "work_formats": ["hybrid"],
+        "only_home_city": True,
+        "wishes": "Фрунзенский район",
+        "salary_usd": 1000,
+        "directions_add": ["backend developer", "go developer"],
+        "exclude_add": ["senior"],
+        "garbage": 1,
+    }
+    lines = preview_patch(p, f, patch, max_queries=2)
+    assert p.work_formats == ["remote", "office"] and f.queries == ["python developer"]
+    assert any("гибрид" in x.lower() for x in lines)
+    assert any("не влезло" in x for x in lines)
+
+    apply_patch(p, f, patch, max_queries=2)
+    assert p.work_formats == ["hybrid"] and p.only_home_city and p.wishes == "Фрунзенский район"
+    assert f.formats == ["hybrid"] and f.only_home_city and f.min_salary_usd == 800
+    assert f.queries == ["python developer", "backend developer"]
+    assert f.exclude == ["senior"]
+    assert "Фрунзенский район" in p.context_line()

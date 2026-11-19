@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any
@@ -48,6 +49,12 @@ class UserProfile:
     relocation_countries: list[str] = field(default_factory=list)
     salary_usd: int | None = None  # 0 — не важно, None — неизвестно
     directions: list[str] = field(default_factory=list)  # поисковые запросы из резюме
+    #: офис / гибрид — только в своём городе
+    only_home_city: bool = False
+    #: скрывать вакансии без указанного формата
+    strict_format: bool = False
+    #: свободные пожелания: район, метро, график… — учитывает ИИ
+    wishes: str = ""
     answered: list[str] = field(default_factory=list)  # вопросы, на которые ответил человек
 
     def to_json(self) -> str:
@@ -184,6 +191,10 @@ class UserProfile:
             parts.append("без релокации")
         if self.salary_usd:
             parts.append(f"ожидания от {self.salary_usd}$/мес")
+        if self.only_home_city and self.city:
+            parts.append(f"офис/гибрид только в г. {self.city}")
+        if self.wishes:
+            parts.append(f"пожелания: {self.wishes}")
         return "; ".join(parts)
 
 
@@ -195,6 +206,11 @@ def apply_to_filters(p: UserProfile, f: UserFilters, *, max_queries: int) -> Non
         f.levels = list(LEVEL_RANGE[p.level])
 
     countries: list[str] = []
+    f.formats = [x for x in p.work_formats if x in WORK_FORMATS]
+    f.strict_format = p.strict_format
+    f.only_home_city = p.only_home_city
+    f.home_city = p.city
+    f.home_country = p.country or p.citizenship
     if p.work_formats:
         if {"office", "hybrid"} & set(p.work_formats):
             home = p.country or p.citizenship
@@ -209,3 +225,108 @@ def apply_to_filters(p: UserProfile, f: UserFilters, *, max_queries: int) -> Non
     if p.salary_usd is not None:
         # чуть ниже ожиданий: вилки часто занижены, а торг возможен
         f.min_salary_usd = int(p.salary_usd * 0.8)
+
+
+#: какие ключи может вернуть ИИ при разборе фразы «хочу только гибрид…»
+PATCH_KEYS = (
+    "work_formats",
+    "only_home_city",
+    "strict_format",
+    "city",
+    "level",
+    "relocation",
+    "relocation_countries",
+    "salary_usd",
+    "wishes",
+    "directions_add",
+    "directions_remove",
+    "exclude_add",
+)
+
+
+def apply_patch(
+    p: UserProfile, f: UserFilters, patch: dict[str, Any], *, max_queries: int
+) -> list[str]:
+    """Применяет правку к профилю и анкете. Возвращает описание изменений для человека."""
+    changes: list[str] = []
+
+    def str_list(key: str) -> list[str]:
+        value = patch.get(key) or []
+        return (
+            [str(x).strip()[:60] for x in value if str(x).strip()]
+            if isinstance(value, list)
+            else []
+        )
+
+    if "work_formats" in patch:
+        formats = [x for x in str_list("work_formats") if x in WORK_FORMATS]
+        if formats:
+            p.work_formats = formats
+            p.mark("work_formats")
+            changes.append("формат: " + ", ".join(WORK_FORMATS[x] for x in formats))
+    if isinstance(patch.get("city"), str) and patch["city"].strip():
+        p.city = patch["city"].strip()[:40]
+        changes.append(f"город: {p.city}")
+    if isinstance(patch.get("only_home_city"), bool):
+        p.only_home_city = patch["only_home_city"]
+        where = f"г. {p.city}" if p.city else "мой город"
+        changes.append(f"офис и гибрид только в {where}" if p.only_home_city else "любой город")
+    if isinstance(patch.get("strict_format"), bool):
+        p.strict_format = patch["strict_format"]
+        changes.append(
+            "скрывать вакансии без формата" if p.strict_format else "показывать без формата"
+        )
+    level = str(patch.get("level") or "").lower()
+    if level in LEVEL_RANGE:
+        p.level = level
+        p.mark("level")
+        changes.append(f"уровень: {level}")
+    if isinstance(patch.get("relocation"), bool):
+        p.relocation = patch["relocation"]
+        p.mark("relocation")
+        if not p.relocation:
+            p.relocation_countries = []
+        changes.append("готов к релокации" if p.relocation else "без релокации")
+    countries = [c.upper() for c in str_list("relocation_countries") if c.upper() in COUNTRIES]
+    if countries:
+        p.relocation, p.relocation_countries = True, countries
+        p.mark("relocation")
+        changes.append("релокация: " + ", ".join(countries))
+    if "salary_usd" in patch:
+        try:
+            p.salary_usd = max(0, int(float(patch["salary_usd"])))
+            p.mark("salary")
+            changes.append(f"зарплата от {p.salary_usd}$" if p.salary_usd else "зарплата не важна")
+        except (TypeError, ValueError):
+            pass
+    if isinstance(patch.get("wishes"), str):
+        p.wishes = patch["wishes"].strip()[:300]
+        changes.append(f"пожелания: {p.wishes}" if p.wishes else "пожелания очищены")
+
+    apply_to_filters(p, f, max_queries=max_queries)
+
+    removed = {d.lower() for d in str_list("directions_remove")}
+    if removed:
+        f.queries = [q for q in f.queries if q.lower() not in removed]
+        changes.append("убрал направления: " + ", ".join(sorted(removed)))
+    added = [
+        d for d in str_list("directions_add") if d.lower() not in {q.lower() for q in f.queries}
+    ]
+    room = max(0, max_queries - len(f.queries))
+    if added[:room]:
+        f.queries = [*f.queries, *added[:room]]
+        changes.append("добавил направления: " + ", ".join(added[:room]))
+    if len(added) > room:
+        changes.append(f"не влезло по тарифу: {', '.join(added[room:])}")
+    stop = [w for w in str_list("exclude_add") if w.lower() not in {x.lower() for x in f.exclude}]
+    if stop:
+        f.exclude = [*f.exclude, *stop]
+        changes.append("стоп-слова: " + ", ".join(stop))
+    return changes
+
+
+def preview_patch(
+    p: UserProfile, f: UserFilters, patch: dict[str, Any], *, max_queries: int
+) -> list[str]:
+    """То же, что apply_patch, но без изменения оригиналов — для подтверждения."""
+    return apply_patch(copy.deepcopy(p), copy.deepcopy(f), patch, max_queries=max_queries)

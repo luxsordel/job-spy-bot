@@ -316,3 +316,36 @@ async def test_evaluate_retries_once_on_garbage(db):
     add_resume(db, 1, "R", {})
     assert (await ai.evaluate(user, vac("1", "X"))).score == 80
     assert len(fake.requests) == 2
+
+
+async def test_parse_profile_edit(db):
+    class EditLLM(FakeLLM):
+        def __call__(self, request):
+            body = json.loads(request.content)
+            self.requests.append(body)
+            content = (
+                '{"work_formats": ["hybrid"], "only_home_city": true, "wishes": "Фрунзенский"}'
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": content}}],
+                    "usage": {"total_tokens": 90},
+                },
+            )
+
+    fake = EditLLM()
+    ai = make_ai(db, fake)
+    user = db.ensure_user(1, allowed=True)
+    patch = await ai.parse_profile_edit(user, "только гибрид во Фрунзенском районе")
+    assert patch["work_formats"] == ["hybrid"] and patch["only_home_city"] is True
+    assert "Текущий профиль" in fake.requests[0]["messages"][0]["content"]
+    assert fake.requests[0]["max_tokens"] <= 300
+
+
+def test_vacancy_prompt_has_address_and_format():
+    from jobspybot.ai.service import vacancy_prompt
+
+    v = vac("1", "Dev", address="Минск, ул. Притыцкого (м. Пушкинская)", work_formats=("hybrid",))
+    text = vacancy_prompt(v, "")
+    assert "Адрес: Минск, ул. Притыцкого (м. Пушкинская)" in text and "Формат: hybrid" in text

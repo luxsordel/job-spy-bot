@@ -66,6 +66,17 @@ EVAL_SYSTEM = """Ты оцениваешь, насколько вакансия 
 Пиши коротко, без повторов.
 """
 
+PROFILE_EDIT_SYSTEM = """Пользователь бота поиска работы пишет, что хочет изменить в поиске.
+Верни только JSON с полями, которые нужно изменить (остальные не включай):
+{"work_formats": ["remote|hybrid|office"], "only_home_city": true/false, \
+"strict_format": true/false, "city": "город", "level": "intern|junior|middle|senior|lead", \
+"relocation": true/false, "relocation_countries": ["ISO-коды из BY RU KZ GE PL"], \
+"salary_usd": число в $ в месяц, "wishes": "район, метро, график и прочее, что не влезло в поля", \
+"directions_add": ["поисковые запросы"], "directions_remove": ["запросы"], \
+"exclude_add": ["стоп-слова"], "unclear": "что непонятно, если просьба неясна"}
+«Только гибрид» → work_formats ["hybrid"]. Район или метро → wishes и only_home_city: true.
+Текущий профиль: """
+
 LETTER_SYSTEM = """Напиши сопроводительное письмо к вакансии от лица кандидата, на языке \
 вакансии, до 900 символов. Конкретно: 2–3 факта из профиля, которые закрывают требования \
 вакансии. Без шаблонных фраз и выдуманных фактов. Только текст письма.
@@ -153,6 +164,10 @@ def vacancy_prompt(v: Vacancy, description: str) -> str:
         f"Компания: {v.company or '—'}",
         f"Локация: {v.location or '—'}{' (удалённо)' if v.remote else ''}",
     ]
+    if v.address:
+        head.append(f"Адрес: {v.address}")
+    if v.work_formats:
+        head.append("Формат: " + ", ".join(v.work_formats))
     if v.salary_text():
         head.append(f"Зарплата: {v.salary_text()}")
     if v.level:
@@ -313,6 +328,35 @@ class AIService:
         analysis = await self.evaluate(user, vacancy)
         chosen = analysis and next((r for r in resumes if r.id == analysis.resume_id), None)
         return chosen or resumes[0]
+
+    # --- правка профиля словами ---------------------------------------------
+
+    async def parse_profile_edit(self, user: User, text: str) -> dict[str, Any] | None:
+        """Фраза пользователя → правка профиля (JSON). None — лимит или ошибка ИИ."""
+        if not self.has_budget(user):
+            return None
+        profile = self.db.get_profile(user.id)
+        current = json.dumps(
+            {
+                "city": profile.city,
+                "work_formats": profile.work_formats,
+                "only_home_city": profile.only_home_city,
+                "level": profile.level,
+                "relocation": profile.relocation,
+                "salary_usd": profile.salary_usd,
+                "wishes": profile.wishes,
+                "directions": user.filters.queries,
+            },
+            ensure_ascii=False,
+        )
+        try:
+            reply = await self._ask(
+                user, PROFILE_EDIT_SYSTEM + current, text[:500], max_tokens=300, json_mode=True
+            )
+            return parse_json(reply)
+        except LLMError as exc:
+            log.warning("profile edit for %s failed: %s", user.id, exc)
+            return None
 
     # --- письмо --------------------------------------------------------------
 
