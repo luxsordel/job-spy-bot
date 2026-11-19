@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from html import escape
 from typing import Any
 
-from jobspybot import notify
+from jobspybot import feedback, notify
 from jobspybot.billing import PRO, SUBSCRIPTION_PERIOD_SECONDS, Billing
 from jobspybot.config import Settings
 from jobspybot.db import Database, Resume, User, utcnow
@@ -217,6 +217,7 @@ class Bot:
         row += [
             button(text, data=f"{p}:{delivery_id}") for p, (text, _) in self.extra_buttons.items()
         ]
+        row.append(button("👍", data=f"like:{delivery_id}"))
         row.append(button("👎", data=f"nope:{delivery_id}"))
         await self.api.send_message(
             user.id, r.vacancy_card(vacancy, extra), reply_markup=inline_keyboard(row)
@@ -1061,10 +1062,11 @@ class Bot:
         await self.reply(
             user,
             "<b>📊 Статистика за 7 дней</b>\n\n"
-            f"📨 Прислал вакансий: <b>{s.get('sent', 0) + s.get('disliked', 0)}</b>\n"
+            "📨 Прислал вакансий: "
+            f"<b>{s.get('sent', 0) + s.get('liked', 0) + s.get('disliked', 0)}</b>\n"
             f"🧹 Отсеял фильтрами: {s.get('filtered', 0)}\n"
             f"🤖 Отсеял ИИ как неподходящие: {s.get('ai_rejected', 0)}\n"
-            f"👎 Вы скрыли: {s.get('disliked', 0)}\n\n"
+            f"👍 Понравились: {s.get('liked', 0)} · 👎 скрыли: {s.get('disliked', 0)}\n\n"
             f"<b>Сегодня</b>: {today}" + (f" из {limit}" if limit else "") + " вакансий, "
             f"ИИ — {tokens * 100 // max(1, self.billing.ai_token_limit(user))}% дневного лимита",
         )
@@ -1677,6 +1679,8 @@ class Bot:
 
         handler = {
             "nope": self._cb_nope,
+            "like": self._cb_like,
+            "exw": self._cb_exclude_word,
             "rdel": self._cb_resume_delete,
             "ob": self._cb_onboarding,
             "pq": self._cb_question,
@@ -1703,11 +1707,61 @@ class Bot:
     async def _cb_nope(self, user: User, cb: dict, value: str, msg: dict) -> None:
         if value.isascii() and value.isdigit():
             self.db.set_status(user.id, int(value), "disliked")
-        await self.api.answer_callback(cb["id"], "Скрыто")
+        await self.api.answer_callback(cb["id"], "Скрыто — учту при подборе")
         if msg:
             first = msg.get("reply_markup", {}).get("inline_keyboard", [[]])[0][:1]
             await self.api.edit_reply_markup(
                 msg["chat"]["id"], msg["message_id"], inline_keyboard(first)
+            )
+        await self._suggest_stop_word(user)
+
+    async def _cb_like(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        if value.isascii() and value.isdigit():
+            self.db.set_status(user.id, int(value), "liked")
+        await self.api.answer_callback(cb["id"], "👍 Запомнил — буду искать похожие")
+        if msg:
+            # 🔗 и «Отклик» остаются, реакции убираем
+            row = msg.get("reply_markup", {}).get("inline_keyboard", [[]])[0]
+            keep = [
+                b for b in row if not str(b.get("callback_data", "")).startswith(("like:", "nope:"))
+            ]
+            await self.api.edit_reply_markup(
+                msg["chat"]["id"], msg["message_id"], inline_keyboard(keep)
+            )
+
+    async def _suggest_stop_word(self, user: User) -> None:
+        """«Вы скрыли 3 вакансии с „1С“ — добавить в стоп-слова?» — по одному разу на слово."""
+        hinted = [k.removeprefix("hint:") for k in self.db.keys_like(user.id, "hint:")]
+        hint = feedback.dislike_hint(
+            self.db.reaction_titles(user.id, "disliked"),
+            self.db.reaction_titles(user.id, "liked"),
+            user.filters.exclude,
+            keep=user.filters.queries,
+            already_hinted=hinted,
+        )
+        if hint is None:
+            return
+        word, count = hint
+        self.db.bump(user.id, f"hint:{word}")
+        await self.reply(
+            user,
+            f"💡 Вы скрыли {feedback.vacancies_word(count)} со словом «{escape(word)}». "
+            "Добавить его в стоп-слова, чтобы такие больше не приходили?",
+            inline_keyboard([button(f"🚫 Добавить «{word}»", data=f"exw:{word}")]),
+        )
+
+    async def _cb_exclude_word(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        word = clean_text(value, 40).lower()
+        f = user.filters
+        if word and word not in {w.lower() for w in f.exclude}:
+            f.exclude = [*f.exclude, word]
+            self.db.save_filters(user.id, f)
+        await self.api.answer_callback(cb["id"], f"Добавил «{word}» в стоп-слова")
+        if msg:
+            await self.edit(
+                msg,
+                f"🚫 «{escape(word)}» в стоп-словах. Убрать — ⚙️ Фильтры → Стоп-слова.",
+                None,
             )
 
     async def _cb_resume_delete(self, user: User, cb: dict, value: str, msg: dict) -> None:

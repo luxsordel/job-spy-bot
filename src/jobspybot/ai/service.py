@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass, field
 from html import escape
 from typing import Any
 
+from jobspybot import feedback
 from jobspybot.ai.client import LLMClient, LLMError, parse_json
 from jobspybot.ai.compress import compress_description
 from jobspybot.config import AISettings
@@ -65,6 +66,8 @@ EVAL_SYSTEM = """Ты оцениваешь, насколько вакансия 
 другая профессия (например, бизнес-аналитик, продажи или поддержка для того, кто ищет \
 разработку или тестирование), ставь score не выше 20, даже если в тексте встречаются те же \
 слова (AI, Python).
+После «понравились:» и «скрыл:» — недавние реакции кандидата на присланные вакансии: \
+похожие на скрытые оценивай ниже, похожие на понравившиеся — выше.
 Ответь только JSON:
 {"best": номер резюме, "score": 0-100, "by": "ok|risk|no", "verdict": "до 90 символов", \
 "pros": ["до 2 пунктов по 50 символов"], "cons": ["до 2 пунктов по 50 символов"], \
@@ -371,6 +374,12 @@ class AIService:
         context = self.db.get_profile(user.id).context_line()
         if user.filters.queries:
             context += "; ищет: " + ", ".join(user.filters.queries[:10])
+        reactions = feedback.context(
+            self.db.reaction_titles(user.id, "liked", feedback.CONTEXT_TITLES),
+            self.db.reaction_titles(user.id, "disliked", feedback.CONTEXT_TITLES),
+        )
+        if reactions:
+            context += "; " + reactions
         key = profiles_hash(resumes, context)
         cached = self.db.get_ai_cache(vacancy.uid, key)
         if cached:

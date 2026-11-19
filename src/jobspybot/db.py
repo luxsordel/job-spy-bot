@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS deliveries (
     user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     vacancy_uid  TEXT NOT NULL,
     fingerprint  TEXT NOT NULL,
-    status       TEXT NOT NULL,  -- sent | queued | skipped | filtered | ai_rejected | disliked
+    status       TEXT NOT NULL,  -- sent | queued | skipped | filtered | ai_rejected
+                                 -- | liked | disliked
     reason       TEXT NOT NULL DEFAULT '',
     score        INTEGER,
     created_at   TEXT NOT NULL,
@@ -366,6 +367,29 @@ class Database:
         )
         return self.count_today(user_id, key)
 
+    def ever(self, user_id: int, key: str) -> bool:
+        """Был ли счётчик хоть раз (например, подсказка уже показывалась)."""
+        row = self.conn.execute(
+            "SELECT 1 FROM counters WHERE user_id = ? AND key = ? LIMIT 1", (user_id, key)
+        ).fetchone()
+        return row is not None
+
+    def keys_like(self, user_id: int, prefix: str) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT key FROM counters WHERE user_id = ? AND key LIKE ?",
+            (user_id, prefix.replace("%", "") + "%"),
+        )
+        return [r[0] for r in rows]
+
+    def reaction_titles(self, user_id: int, status: str, limit: int = 50) -> list[str]:
+        """Названия вакансий с реакцией 👍 (liked) или 👎 (disliked), свежие первыми."""
+        rows = self.conn.execute(
+            "SELECT v.data FROM deliveries d JOIN vacancies v ON v.uid = d.vacancy_uid"
+            " WHERE d.user_id = ? AND d.status = ? ORDER BY d.created_at DESC LIMIT ?",
+            (user_id, status, limit),
+        )
+        return [str(json.loads(r[0]).get("title") or "") for r in rows]
+
     def count_today(self, user_id: int, key: str) -> int:
         row = self.conn.execute(
             "SELECT n FROM counters WHERE user_id = ? AND day = ? AND key = ?",
@@ -437,7 +461,8 @@ class Database:
         """Вакансия (или её копия с другой площадки) уже обработана для пользователя."""
         row = self.conn.execute(
             "SELECT 1 FROM deliveries WHERE user_id = ? AND (vacancy_uid = ? OR"
-            " (fingerprint = ? AND status IN ('sent', 'disliked', 'ai_rejected'))) LIMIT 1",
+            " (fingerprint = ? AND status IN ('sent', 'liked', 'disliked', 'ai_rejected')))"
+            " LIMIT 1",
             (user_id, vacancy.uid, vacancy.fingerprint),
         ).fetchone()
         return row is not None
@@ -650,7 +675,7 @@ class Database:
         day = utcnow().date().isoformat()
         row = self.conn.execute(
             "SELECT COUNT(*) FROM deliveries WHERE user_id = ?"
-            " AND status IN ('sent', 'disliked', 'queued') AND created_at >= ?",
+            " AND status IN ('sent', 'liked', 'disliked', 'queued') AND created_at >= ?",
             (user_id, day),
         ).fetchone()
         return row[0]
