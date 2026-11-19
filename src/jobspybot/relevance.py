@@ -125,6 +125,9 @@ ROLE_FAMILIES: dict[str, tuple[str, ...]] = {
         "менеджер по продажам",
         "presale",
         "пресейл",
+        "развитию бизнеса",
+        "развития бизнеса",
+        "bizdev",
     ),
     "support": (
         "support",
@@ -147,6 +150,8 @@ ROLE_FAMILIES: dict[str, tuple[str, ...]] = {
         "копирайтер",
         "таргетолог",
         "ppc",
+        "pr",
+        "связям с общественност",
     ),
     "security": ("security", "безопасност", "pentest", "пентест", "soc", "appsec"),
     "gamedev": ("gamedev", "game developer", "unreal", "геймдизайн", "game designer"),
@@ -165,20 +170,21 @@ ROLE_FAMILIES: dict[str, tuple[str, ...]] = {
 
 #: близкие роли: кто ищет AI-разработку, тому подходят и Python-вакансии, и наоборот
 RELATED: dict[str, frozenset[str]] = {
-    "ai": frozenset({"python", "data", "dev"}),
-    "python": frozenset({"ai", "backend", "data"}),
-    "backend": frozenset({"python", "go", "java", "dotnet", "php", "js"}),
+    "ai": frozenset({"python", "dev"}),
+    "python": frozenset({"ai", "backend"}),
     "fullstack": frozenset({"frontend", "backend", "js"}),
     "frontend": frozenset({"js", "fullstack"}),
     "js": frozenset({"frontend", "fullstack"}),
-    "data": frozenset({"python", "ai"}),
-    "qa": frozenset(),
-    "mobile": frozenset({"java", "dotnet"}),
+    "data": frozenset({"python"}),
+    # «backend» и «mobile» сами по себе язык не задают: Java, Go, .NET подтягиваются
+    # только из навыков человека (TECH), а не по умолчанию
 }
 
 #: семейства-профессии: если такая есть в названии, а человек её не ищет, это другая работа,
 #: даже если рядом стоит «AI» или «Python» («Менеджер по продажам ИИ-решений»)
-PROFESSIONS = frozenset({"analyst", "pm", "design", "sales", "support", "hr", "marketing"})
+PROFESSIONS = frozenset(
+    {"analyst", "pm", "design", "sales", "support", "hr", "marketing", "qa", "devops"}
+)
 
 #: семейства-технологии: если технология есть в навыках человека, вакансии по ней подходят
 TECH = frozenset(
@@ -233,6 +239,8 @@ def user_families(queries: Iterable[str], skills: Iterable[str] = ()) -> frozens
         found |= RELATED.get(f, frozenset())
     for skill in skills:
         found |= families(skill) & TECH
+    if {"frontend", "backend"} <= found:
+        found.add("fullstack")
     return frozenset(found)
 
 

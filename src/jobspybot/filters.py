@@ -113,6 +113,51 @@ def contains_term(text: str, term: str) -> bool:
     return bool(term) and bool(_term_re(term).search(_norm(text)))
 
 
+LEVEL_ORDER = [lv.value for lv in Level]
+
+#: слова уровня в названии вакансии. Короткие — целым словом, длинные — с начала слова
+_TITLE_LEVELS: dict[str, tuple[str, ...]] = {
+    "intern": ("intern", "internship", "trainee", "стажер", "стажировк", "практикант"),
+    "junior": ("junior", "jun", "джун", "джуниор", "младший", "начинающ", "entry level"),
+    "middle": ("middle", "mid", "мидл"),
+    "senior": ("senior", "sr", "сеньор", "синьор", "старший", "ведущий"),
+    "lead": (
+        "lead",
+        "лид",
+        "тимлид",
+        "teamlead",
+        "head of",
+        "руководител",
+        "principal",
+        "архитектор",
+        "architect",
+        "главный",
+        "chief",
+        "cto",
+        "director",
+        "директор",
+    ),
+}
+
+
+@lru_cache(maxsize=1)
+def _title_level_re() -> dict[str, re.Pattern[str]]:
+    out = {}
+    for level, words in _TITLE_LEVELS.items():
+        parts = [
+            rf"(?<![\w]){re.escape(w)}(?![\w])" if len(w) <= 4 else rf"(?<![\w]){re.escape(w)}"
+            for w in words
+        ]
+        out[level] = re.compile("|".join(parts))
+    return out
+
+
+def title_levels(title: str) -> set[str]:
+    """Уровни, прямо названные в названии вакансии: «Junior+», «Middle / Senior», «Стажёр»."""
+    text = _norm(title)
+    return {lv for lv, pattern in _title_level_re().items() if pattern.search(text)}
+
+
 def check(
     v: Vacancy, f: UserFilters, *, max_age_days: int = 7, now: datetime | None = None
 ) -> str | None:
@@ -129,8 +174,15 @@ def check(
     if f.include and not any(contains_term(v.title, w) for w in f.include):
         return "нет обязательных слов в названии"
 
-    if f.levels and v.level and v.level.value not in f.levels:
-        return f"уровень {v.level.value}"
+    if f.levels:
+        # уровень из названия важнее оценки площадки: hh выводит его из опыта, и «1–3 года»
+        # превращает «Junior Backend-разработчика» в middle
+        stated = title_levels(v.title)
+        if stated:
+            if not stated & set(f.levels):
+                return "уровень " + "/".join(lv for lv in LEVEL_ORDER if lv in stated)
+        elif v.level and v.level.value not in f.levels:
+            return f"уровень {v.level.value}"
 
     if f.remote_only and v.remote is not True:
         return "не удалёнка"
