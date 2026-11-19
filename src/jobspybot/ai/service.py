@@ -46,6 +46,8 @@ PROFILE_SYSTEM = """Разбери резюме для автоматическ�
 "experience_years": число лет практического опыта, \
 "skills": ["до 20 технологий/навыков в нижнем регистре"], \
 "languages": ["язык и уровень"], \
+"education": ["каждое образование отдельной строкой: учебное заведение, специальность, \
+год окончания или «не окончено»; курсы тоже"], \
 "city": "город проживания", "country": "страна проживания, ISO-код из 2 букв", \
 "citizenship": "гражданство, ISO-код из 2 букв, если указано", \
 "work_formats": ["remote|hybrid|office — только если в резюме указано"], \
@@ -292,7 +294,7 @@ class AIService:
                     user,
                     PROFILE_SYSTEM,
                     redact_contacts(resume.text),
-                    max_tokens=800,
+                    max_tokens=1000,
                     json_mode=True,
                 )
             )
@@ -307,6 +309,7 @@ class AIService:
                 "level": str(data.get("level") or ""),
                 "skills": skills,
                 "languages": [str(x)[:40] for x in data.get("languages") or []][:5],
+                "education": [str(x)[:120] for x in data.get("education") or []][:4],
                 "wants": str(data.get("wants") or "")[:200],
             },
             ensure_ascii=False,
