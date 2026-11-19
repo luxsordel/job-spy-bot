@@ -123,7 +123,8 @@ def welcome(name: str, trial_days: int) -> str:
         "🇧🇾 Предупреждаю, если вакансия недоступна гражданам РБ\n"
         "📄 Выбираю лучшее из ваших резюме и пишу сопроводительное письмо"
         f"{trial}\n\n"
-        "Настроим поиск за 1 минуту 👇"
+        "Настроим поиск за 1 минуту 👇\n\n"
+        "<i>Продолжая, вы соглашаетесь с /privacy — что я храню и как удалить данные.</i>"
     )
 
 
@@ -186,7 +187,9 @@ def _years(value: float) -> str:
 def profile_card(p: UserProfile, queries: list[str], *, title: str = "👤 Профиль") -> str:
     unknown = "<i>не указано</i>"
     head = " · ".join(escape(x) for x in (p.name, p.headline) if x)
-    level = LEVEL_BUTTONS.get(p.level, "") if p.level else ""
+    level = ", ".join(LEVEL_BUTTONS[lv] for lv in p.target_levels() if lv in LEVEL_BUTTONS)
+    if not level and "levels" in p.answered:
+        level = "любой"
     exp = f"опыт {_years(p.experience_years)}" if p.experience_years else ""
     level_line = " · ".join(x for x in (level, exp) if x) or unknown
     place = ", ".join(x for x in (p.city, p.country) if x)
@@ -226,7 +229,10 @@ def profile_card(p: UserProfile, queries: list[str], *, title: str = "👤 Пр�
 
 QUESTION_TEXTS = {
     "directions": ("Что ищем?", "Выберите направления или нажмите «✍️ Свой вариант»."),
-    "level": ("Какой у вас уровень?", "Покажу вакансии этого уровня и на ступень ниже."),
+    "level": (
+        "Вакансии какого уровня показывать?",
+        "Можно несколько — например, Junior и Middle. Затем «Далее».",
+    ),
     "work_formats": ("Какой формат работы подходит?", "Можно несколько."),
     "relocation": ("Готовы к релокации?", "Если да — подскажу вакансии с переездом."),
     "relocation_countries": ("Куда готовы переехать?", "Можно несколько."),
@@ -315,4 +321,45 @@ HELP = f"""<b>{BRAND}</b> — ваш помощник в поиске работ
   Можно несколько резюме под разные роли.
 • 👎 под вакансией — скрыть её.
 • Свои направления: <code>/query python developer; тестировщик</code>
-• Стоп-слова: <code>/exclude senior, 1с</code>"""
+• Стоп-слова: <code>/exclude senior, 1с</code>
+
+<b>Ваши данные</b>
+/privacy — что я храню и кому передаю
+/delete_me — удалить резюме, профиль и историю"""
+
+
+def privacy_text(inactive_days: int, support: str = "") -> str:
+    """Политика конфиденциальности простыми словами."""
+    lines = [
+        "<b>🔐 Ваши данные</b>",
+        "",
+        "<b>Что храню</b>",
+        "• Telegram id и имя пользователя — чтобы присылать вакансии",
+        "• Резюме (текст и ссылку на файл в Telegram), профиль, фильтры",
+        "• Историю: какие вакансии прислал или отсеял — 30 дней",
+        "• Расход ИИ по дням и платежи Telegram Stars",
+        "",
+        "<b>Зачем</b> — только чтобы подбирать вакансии и писать отклики. "
+        "Не продаю и не передаю данные для рекламы.",
+        "",
+        "<b>Кому передаю</b>",
+        "• ИИ-провайдеру — текст резюме <b>без телефонов и email</b> и описания вакансий, "
+        "для оценки и писем",
+        "• Telegram — как любой бот",
+        "",
+        "<b>Сколько храню</b>",
+        "• Пока вы пользуетесь ботом",
+        (
+            f"• Если не заходите {inactive_days} дней и нет активной подписки — "
+            "удаляю резюме, профиль и историю автоматически"
+            if inactive_days
+            else "• До вашей просьбы об удалении"
+        ),
+        "• После удаления остаются только id, срок подписки и платежи — "
+        "для возвратов и чтобы пробный период нельзя было брать заново",
+        "",
+        "Удалить всё сейчас — кнопка ниже или /delete_me.",
+    ]
+    if support:
+        lines += ["", f"Вопросы: {escape(support)}"]
+    return "\n".join(lines)

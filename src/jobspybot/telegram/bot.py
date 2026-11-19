@@ -13,6 +13,18 @@ from jobspybot.billing import PRO, SUBSCRIPTION_PERIOD_SECONDS, Billing
 from jobspybot.config import Settings
 from jobspybot.db import Database, Resume, User, utcnow
 from jobspybot.filters import COUNTRIES, UserFilters
+from jobspybot.guard import RateLimiter
+from jobspybot.limits import (
+    MAX_CITY_LEN,
+    MAX_GRANT_DAYS,
+    MAX_PHRASE_LEN,
+    MAX_WISHES_LEN,
+    InputError,
+    clean_list,
+    clean_text,
+    parse_int,
+    parse_salary,
+)
 from jobspybot.models import Level, Vacancy
 from jobspybot.profile import (
     PATCH_KEYS,
@@ -22,6 +34,7 @@ from jobspybot.profile import (
     apply_patch,
     apply_to_filters,
     preview_patch,
+    remember_override,
 )
 from jobspybot.resume_files import (
     MAX_FILE_BYTES,
@@ -50,6 +63,7 @@ COMMANDS = [
     ("plan", "Подписка"),
     ("stats", "Статистика"),
     ("help", "Помощь"),
+    ("privacy", "Мои данные и их удаление"),
 ]
 
 BOT_DESCRIPTION = (
@@ -70,7 +84,7 @@ CallbackHook = Callable[[User, dict[str, Any], str], Awaitable[None]]
 
 
 def parse_list(raw: str) -> list[str]:
-    return list(dict.fromkeys(p.strip() for p in _SPLIT.split(raw) if p.strip()))
+    return clean_list(_SPLIT.split(raw))
 
 
 def main_menu() -> dict[str, Any]:
@@ -104,6 +118,7 @@ class Bot:
         #: разбор фразы «хочу только гибрид…» в правку профиля (подключается модулем ИИ)
         self.on_profile_edit: EditHook | None = None
         self._pending_patch: dict[int, dict[str, Any]] = {}
+        self.limiter = RateLimiter(settings.guard.rate_limit_per_min)
         self._menu_actions: dict[str, Callable[[User], Awaitable[None]]] = {
             r.BTN_SEARCH: self.show_search,
             r.BTN_RESUMES: self.show_resumes,
@@ -170,7 +185,7 @@ class Bot:
 
     async def send_plan_notices(self) -> None:
         for user in self.db.all_users():
-            if not user.allowed:
+            if not user.allowed or user.banned:
                 continue
             notice = self.billing.notice(user)
             if notice is None:
@@ -194,12 +209,34 @@ class Bot:
     # --- входящие ------------------------------------------------------------
 
     async def handle_update(self, update: dict[str, Any]) -> None:
+        if await self._throttled(update):
+            return
         if "callback_query" in update:
             await self.handle_callback(update["callback_query"])
         elif "pre_checkout_query" in update:
             await self.handle_pre_checkout(update["pre_checkout_query"])
         elif "message" in update:
             await self.handle_message(update["message"])
+
+    async def _throttled(self, update: dict[str, Any]) -> bool:
+        """Слишком частые сообщения и нажатия отбрасываются (оплаты — никогда)."""
+        cb = update.get("callback_query")
+        msg = update.get("message")
+        sender = (cb or msg or {}).get("from") or {}
+        uid = sender.get("id")
+        if not isinstance(uid, int) or uid in self.settings.admin_ids:
+            return False
+        if msg and msg.get("successful_payment"):
+            return False
+        if self.limiter.allow(uid):
+            return False
+        if cb:
+            await self.api.answer_callback(cb["id"], "Слишком часто — подождите минуту")
+        elif self.limiter.should_warn(uid):
+            await self.api.send_message(
+                uid, "⏳ Слишком много сообщений подряд. Подождите минуту — и продолжим."
+            )
+        return True
 
     def _user_from(self, sender: dict[str, Any]) -> User:
         uid = sender["id"]
@@ -236,6 +273,9 @@ class Bot:
 
         if msg.get("successful_payment"):
             await self._on_successful_payment(user, msg["successful_payment"])
+            return
+
+        if user.banned and not self._is_admin(user):
             return
 
         text = (msg.get("text") or "").strip()
@@ -354,6 +394,17 @@ class Bot:
         """Анкета поиска из профиля."""
         profile = self.db.get_profile(user.id)
         apply_to_filters(profile, user.filters, max_queries=self.billing.plan(user).max_queries)
+        self.db.save_profile(user.id, profile)
+        self.db.save_filters(user.id, user.filters)
+
+    def _save_filter_edit(self, user: User, *fields: str) -> None:
+        """Ручная правка в ⚙️ Фильтрах: сохраняем и запоминаем, чтобы профиль её не перетёр."""
+        profile = self.db.get_profile(user.id)
+        if "levels" in fields:
+            profile.set_levels(user.filters.levels)
+        for name in fields:
+            remember_override(profile, user.filters, name)
+        self.db.save_profile(user.id, profile)
         self.db.save_filters(user.id, user.filters)
 
     async def _ask_next(self, user: User, msg: dict[str, Any] | None = None) -> None:
@@ -394,9 +445,13 @@ class Bot:
                 user, ctx="pq", done=button("Готово ➡️", data="pq:next:directions")
             )
         if key == "level":
-            options = {k: v for k, v in r.LEVEL_BUTTONS.items()}
-            selected = [profile.level] if profile.level else []
-            return self._toggle_markup("pq", "level", options, selected, nav=back)
+            return self._toggle_markup(
+                "pq",
+                "level",
+                r.LEVEL_BUTTONS,
+                profile.target_levels(),
+                nav=[*back, button("Далее ➡️", data="pq:next:level")],
+            )
         if key == "work_formats":
             return self._toggle_markup(
                 "pq",
@@ -436,12 +491,19 @@ class Bot:
         else:
             await self.reply(user, text, markup)
 
-    async def show_profile(self, user: User, msg: dict[str, Any] | None = None) -> None:
+    async def show_profile(
+        self, user: User, msg: dict[str, Any] | None = None, *, title: str = "👤 Профиль"
+    ) -> None:
         profile = self.db.get_profile(user.id)
         missing = profile.missing(user.filters)
-        text = r.profile_card(profile, user.filters.queries)
+        text = r.profile_card(profile, user.filters.queries, title=title)
         if profile.is_empty:
             text += "\n\n<i>Пришлите резюме PDF — заполню профиль автоматически.</i>"
+        elif not user.onboarded:
+            text += (
+                "\n\n<i>ИИ мог ошибиться — поправьте кнопками ниже то, что не так, "
+                "и нажмите «Всё верно».</i>"
+            )
         rows = [
             [
                 button("🔍 Направления", data="pe:directions"),
@@ -456,9 +518,12 @@ class Bot:
         ]
         if self.on_profile_edit:
             rows.append([button("✍️ Изменить словами", data="pe:nl")])
-        if missing:
+        if not user.onboarded:
+            # онбординг: после разбора резюме человек проверяет профиль и идёт дальше
+            rows.insert(0, [button("✅ Всё верно — дальше", data="ob:next")])
+        elif missing:
             rows.insert(0, [button(f"✍️ Дозаполнить ({len(missing)})", data="pe:fill_missing")])
-        if self.on_resume and self.db.get_resumes(user.id):
+        if user.onboarded and self.on_resume and self.db.get_resumes(user.id):
             rows.append([button("📄 Обновить из резюме", data="pe:fill")])
         markup = inline_keyboard(*rows)
         if msg:
@@ -551,6 +616,13 @@ class Bot:
     async def _nl_edit(self, user: User, text: str) -> None:
         if not self.on_profile_edit:
             await self.reply(user, "Не понял 🤔 Выберите раздел в меню ниже.", main_menu())
+            return
+        if len(text) > MAX_PHRASE_LEN:
+            await self.reply(
+                user,
+                f"Слишком длинно — уложитесь в {MAX_PHRASE_LEN} символов. Резюме присылайте "
+                "файлом PDF.",
+            )
             return
         patch = await self.on_profile_edit(user, text)
         if patch is None:
@@ -803,6 +875,67 @@ class Bot:
     async def cmd_stats(self, user: User, args: str) -> None:
         await self.show_stats(user)
 
+    # --- мои данные ------------------------------------------------------------
+
+    async def cmd_privacy(self, user: User, args: str) -> None:
+        await self.reply(
+            user,
+            r.privacy_text(
+                self.settings.guard.inactive_days, self.settings.billing.support_contact
+            ),
+            inline_keyboard([button("🗑 Удалить мои данные", data="del:ask")]),
+        )
+
+    async def cmd_delete_me(self, user: User, args: str) -> None:
+        await self._ask_delete(user)
+
+    async def _ask_delete(self, user: User, msg: dict[str, Any] | None = None) -> None:
+        text = (
+            "<b>🗑 Удалить мои данные?</b>\n\n"
+            "Удалю резюме, профиль, фильтры и историю вакансий. Восстановить их будет нельзя. "
+            "Подписка Pro, если есть, сохранится до конца оплаченного срока, автопродление "
+            "отключу."
+        )
+        markup = inline_keyboard(
+            [button("🗑 Да, удалить", data="del:yes"), button("Отмена", data="del:no")]
+        )
+        if msg:
+            await self.edit(msg, text, markup)
+        else:
+            await self.reply(user, text, markup)
+
+    async def delete_user_data(self, user: User) -> None:
+        """Удаление по просьбе пользователя или из админки."""
+        if user.sub_charge_id:
+            try:
+                await self.api.set_star_subscription_canceled(user.id, user.sub_charge_id, True)
+                self.db.set_subscription(user.id, None)
+            except TelegramError as exc:
+                log.warning("cancel subscription of %s failed: %s", user.id, exc)
+        self.db.delete_user_data(user.id)
+        for state in (self._awaiting, self._profile_mode, self._pending_patch, self._cap_notified):
+            state.pop(user.id, None)
+        user.onboarded = False
+
+    async def _cb_delete_data(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        if value == "ask":
+            await self.api.answer_callback(cb["id"])
+            await self._ask_delete(user, msg or None)
+            return
+        if value != "yes":
+            await self.api.answer_callback(cb["id"], "Отменено")
+            if msg:
+                await self.api.edit_reply_markup(msg["chat"]["id"], msg["message_id"], None)
+            return
+        await self.delete_user_data(user)
+        await self.api.answer_callback(cb["id"], "Удалено")
+        text = "✅ Ваши данные удалены. Чтобы начать заново — /start."
+        if msg:
+            await self.edit(msg, text, None)
+        else:
+            await self.reply(user, text)
+        await self.notify_admins(f"🗑 Пользователь <code>{user.id}</code> удалил свои данные")
+
     async def _update_list(self, user: User, args: str, attr: str, title: str) -> None:
         f = user.filters
         if args:
@@ -845,7 +978,7 @@ class Bot:
                 )
                 return
             user.filters.levels = [t for t in dict.fromkeys(tokens) if t]
-            self.db.save_filters(user.id, user.filters)
+            self._save_filter_edit(user, "levels")
         await self.reply(user, f"🎓 Уровень: {', '.join(user.filters.levels) or 'любой'}")
 
     async def cmd_country(self, user: User, args: str) -> None:
@@ -858,26 +991,30 @@ class Bot:
                 )
                 return
             user.filters.countries = [t for t in dict.fromkeys(tokens) if t]
-            self.db.save_filters(user.id, user.filters)
+            self._save_filter_edit(user, "countries")
         shown = ", ".join(COUNTRIES[c] for c in user.filters.countries) or "любые"
         await self.reply(user, f"🌍 Страны: {shown}")
 
     async def cmd_remote(self, user: User, args: str) -> None:
         user.filters.remote_only = not user.filters.remote_only
-        self.db.save_filters(user.id, user.filters)
+        self._save_filter_edit(user, "remote_only")
         await self.reply(user, f"🏠 Только удалёнка: {'да' if user.filters.remote_only else 'нет'}")
 
     async def cmd_salary(self, user: User, args: str) -> None:
         if args:
-            parts = args.split()
-            if not parts[0].isdigit():
+            try:
+                salary = parse_salary(args)
+            except InputError as exc:
+                await self.reply(user, str(exc))
+                return
+            if salary is None:
                 await self.reply(
                     user, "Формат: <code>/salary 1500</code> или <code>/salary 1500 strict</code>"
                 )
                 return
-            user.filters.min_salary_usd = int(parts[0])
-            user.filters.require_salary = "strict" in parts[1:]
-            self.db.save_filters(user.id, user.filters)
+            user.filters.min_salary_usd = salary
+            user.filters.require_salary = "strict" in args.lower().split()
+            self._save_filter_edit(user, "min_salary_usd")
         f = user.filters
         text = f"от {f.min_salary_usd}$" if f.min_salary_usd else "не важна"
         if f.min_salary_usd and f.require_salary:
@@ -886,10 +1023,11 @@ class Bot:
 
     async def cmd_threshold(self, user: User, args: str) -> None:
         if args:
-            if not args.isdigit() or not 0 <= int(args) <= 100:
+            value = parse_int(args)
+            if value is None or not 0 <= value <= 100:
                 await self.reply(user, "Число от 0 до 100, например <code>/threshold 60</code>")
                 return
-            user.filters.ai_threshold = int(args)
+            user.filters.ai_threshold = value
             self.db.save_filters(user.id, user.filters)
         await self.reply(user, f"🤖 Порог ИИ: {user.filters.ai_threshold}/100")
 
@@ -964,6 +1102,11 @@ class Bot:
         if (doc.get("file_size") or 0) > MAX_FILE_BYTES:
             await self.reply(user, "Файл слишком большой (максимум 3 МБ).")
             return
+        limit = self.settings.guard.max_uploads_per_day
+        if not self._is_admin(user) and self.db.count_today(user.id, "upload") >= limit:
+            await self.reply(user, f"На сегодня лимит — {limit} файлов. Попробуйте завтра.")
+            return
+        self.db.bump(user.id, "upload")
         try:
             data = await self.api.download_file(doc["file_id"], max_bytes=MAX_FILE_BYTES)
             text = extract_text(data, name)
@@ -1001,25 +1144,32 @@ class Bot:
             await self.reply(user, await self.on_resume(user, resume))
         else:
             await self.reply(user, f"✅ Резюме «{escape(title)}» сохранено.")
+        understood = self.on_resume and not self.db.get_profile(user.id).is_empty
         if not user.onboarded:
             self._profile_mode[user.id] = "ob"
-            await self.reply(
-                user,
-                r.profile_card(
-                    self.db.get_profile(user.id),
-                    user.filters.queries,
-                    title="👤 Вот что я понял из резюме",
-                ),
-            )
-            await self._ask_next(user)
-        elif self.on_resume:
-            await self.reply(
-                user,
-                "Профиль дополнен данными из резюме.",
-                inline_keyboard([button("👤 Открыть профиль", data="pe:show")]),
-            )
+            if understood:
+                # сначала человек проверяет и правит то, что понял ИИ, потом — вопросы
+                self._apply_profile(user)
+                await self.show_profile(user, title="👤 Вот что я понял из резюме")
+            else:
+                await self._ask_next(user)
+        elif understood:
+            self._apply_profile(user)
+            await self.show_profile(user, title="👤 Профиль дополнен из резюме")
 
     # --- текстовый ввод -------------------------------------------------------
+
+    async def _ask_salary(self, user: User, field: str, text: str) -> int | None:
+        """Сумма из ответа или None — тогда переспрашиваем, оставаясь в том же поле."""
+        try:
+            salary = parse_salary(text)
+            problem = None if salary is not None else "Нужно число в долларах, например 1200."
+        except InputError as exc:
+            salary, problem = None, str(exc)
+        if problem:
+            self._awaiting[user.id] = field
+            await self.reply(user, f"{problem} Попробуйте ещё раз.")
+        return salary
 
     async def _receive_input(self, user: User, field: str, text: str) -> None:
         f = user.filters
@@ -1028,7 +1178,12 @@ class Bot:
             return
         if field == "city_pq":
             profile = self.db.get_profile(user.id)
-            profile.city = text.strip()[:40]
+            city = clean_text(text, MAX_CITY_LEN)
+            if not city:
+                self._awaiting[user.id] = field
+                await self.reply(user, "Напишите название города, например <b>Минск</b>.")
+                return
+            profile.city = city
             profile.only_home_city = True
             self.db.save_profile(user.id, profile)
             self._apply_profile(user)
@@ -1036,7 +1191,7 @@ class Bot:
             return
         if field == "wishes_pq":
             profile = self.db.get_profile(user.id)
-            profile.wishes = "" if text.strip() == "-" else text.strip()[:300]
+            profile.wishes = "" if text.strip() == "-" else clean_text(text, MAX_WISHES_LEN)
             self.db.save_profile(user.id, profile)
             await self.show_profile(user)
             return
@@ -1051,20 +1206,20 @@ class Bot:
             await self._show_question(user, "directions", None)
             return
         if field == "salary_pq":
-            digits = re.sub(r"\D", "", text)
-            if not digits:
-                self._awaiting[user.id] = field
-                await self.reply(user, "Нужно число в долларах, например 1200.")
+            salary = await self._ask_salary(user, field, text)
+            if salary is None:
                 return
             profile = self.db.get_profile(user.id)
-            profile.salary_usd = int(digits)
+            profile.salary_usd = salary
             profile.mark("salary")
             self.db.save_profile(user.id, profile)
             await self._after_answer(user, None)
             return
         if field == "skills_pq":
             profile = self.db.get_profile(user.id)
-            profile.skills = [] if text.strip() == "-" else parse_list(text)[:40]
+            profile.skills = (
+                [] if text.strip() == "-" else clean_list(_SPLIT.split(text), max_items=40)
+            )
             self.db.save_profile(user.id, profile)
             f.skills = profile.skills
             self.db.save_filters(user.id, f)
@@ -1085,13 +1240,11 @@ class Bot:
             self.db.save_filters(user.id, f)
             await self.reply(user, f"🚫 Стоп-слова: {escape(', '.join(f.exclude)) or '—'}")
         elif field == "salary":
-            digits = re.sub(r"\D", "", text)
-            if not digits:
-                self._awaiting[user.id] = field
-                await self.reply(user, "Нужно число в долларах, например 1200. 0 — не важно.")
+            salary = await self._ask_salary(user, field, text)
+            if salary is None:
                 return
-            f.min_salary_usd = int(digits)
-            self.db.save_filters(user.id, f)
+            f.min_salary_usd = salary
+            self._save_filter_edit(user, "min_salary_usd")
             await self.reply(
                 user,
                 f"💰 Зарплата: {f'от {f.min_salary_usd}$' if f.min_salary_usd else 'не важна'}",
@@ -1151,8 +1304,38 @@ class Bot:
             "/invite — одноразовая ссылка\n"
             "/users — список\n"
             "<code>/grant ID ДНЕЙ</code> — выдать Pro\n"
-            "<code>/refund ID</code> — вернуть последний платёж",
+            "<code>/refund ID</code> — вернуть последний платёж\n"
+            "<code>/ban ID</code>, <code>/unban ID</code> — заблокировать / разблокировать"
+            + (
+                "\n\n🖥 Веб-админка: "
+                f"<code>http://{self.settings.admin_web.host}:{self.settings.admin_web.port}</code>"
+                if self.settings.admin_web.enabled
+                else ""
+            ),
         )
+
+    async def cmd_ban(self, user: User, args: str) -> None:
+        await self._set_ban(user, args, True)
+
+    async def cmd_unban(self, user: User, args: str) -> None:
+        await self._set_ban(user, args, False)
+
+    async def _set_ban(self, user: User, args: str, banned: bool) -> None:
+        if not self._is_admin(user):
+            return await self.reply(user, "Только для администратора.")
+        target_id = parse_int(args.split()[0]) if args.split() else None
+        if target_id is None:
+            return await self.reply(
+                user, f"Формат: <code>/{'ban' if banned else 'unban'} ID</code>"
+            )
+        if target_id in self.settings.admin_ids:
+            return await self.reply(user, "Администратора забанить нельзя.")
+        target = self.db.get_user(target_id)
+        if target is None:
+            return await self.reply(user, "Пользователь не найден.")
+        self.db.set_banned(target_id, banned)
+        name = escape(target.username or str(target_id))
+        await self.reply(user, f"{'🚫 Забанен' if banned else '✅ Разбанен'}: {name}")
 
     async def cmd_invite(self, user: User, args: str) -> None:
         if not self._is_admin(user):
@@ -1176,14 +1359,16 @@ class Bot:
     async def cmd_grant(self, user: User, args: str) -> None:
         if not self._is_admin(user):
             return await self.reply(user, "Только для администратора.")
-        parts = args.split()
-        if len(parts) != 2 or not all(p.lstrip("-").isdigit() for p in parts):
+        parts = [parse_int(p) for p in args.split()]
+        if len(parts) != 2 or parts[0] is None or parts[1] is None:
             return await self.reply(user, "Формат: <code>/grant ID ДНЕЙ</code>")
-        target = self.db.get_user(int(parts[0]))
+        if abs(parts[1]) > MAX_GRANT_DAYS:
+            return await self.reply(user, f"Не больше {MAX_GRANT_DAYS} дней за раз.")
+        target = self.db.get_user(parts[0])
         if target is None:
             return await self.reply(user, "Пользователь не найден.")
         self.db.set_allowed(target.id, True)
-        until = self.billing.extend(target, int(parts[1]))
+        until = self.billing.extend(target, parts[1])
         await self.reply(user, f"✅ {escape(target.username)}: Pro до {r.date_ru(until)}")
         try:
             await self.api.send_message(
@@ -1197,9 +1382,11 @@ class Bot:
     async def cmd_refund(self, user: User, args: str) -> None:
         if not self._is_admin(user):
             return await self.reply(user, "Только для администратора.")
-        if not args.isdigit():
+        target_id = parse_int(args)
+        if target_id is None:
             return await self.reply(user, "Формат: <code>/refund ID</code>")
-        charge = self.db.last_payment(int(args))
+        args = str(target_id)
+        charge = self.db.last_payment(target_id)
         if charge is None:
             return await self.reply(user, "Платежей не найдено.")
         try:
@@ -1219,9 +1406,17 @@ class Bot:
         prefix, _, value = data.partition(":")
         msg = cb.get("message") or {}
 
+        if user.banned:
+            await self.api.answer_callback(cb["id"])
+            return
+
         if prefix in ("allow", "deny") and self._is_admin(user):
-            target = self.db.get_user(int(value))
-            self.db.set_allowed(int(value), prefix == "allow")
+            target_id = parse_int(value)
+            if target_id is None:
+                await self.api.answer_callback(cb["id"])
+                return
+            target = self.db.get_user(target_id)
+            self.db.set_allowed(target_id, prefix == "allow")
             await self.api.answer_callback(cb["id"], "Готово")
             if msg:
                 await self.api.edit_reply_markup(msg["chat"]["id"], msg["message_id"], None)
@@ -1248,6 +1443,7 @@ class Bot:
             "plan": self._cb_plan,
             "sub": self._cb_subscription,
             "src": self._cb_sources_legacy,
+            "del": self._cb_delete_data,
         }.get(prefix)
         if handler:
             await handler(user, cb, value, msg)
@@ -1258,7 +1454,7 @@ class Bot:
         await self.api.answer_callback(cb["id"])
 
     async def _cb_nope(self, user: User, cb: dict, value: str, msg: dict) -> None:
-        if value.isdigit():
+        if value.isascii() and value.isdigit():
             self.db.set_status(user.id, int(value), "disliked")
         await self.api.answer_callback(cb["id"], "Скрыто")
         if msg:
@@ -1268,7 +1464,7 @@ class Bot:
             )
 
     async def _cb_resume_delete(self, user: User, cb: dict, value: str, msg: dict) -> None:
-        deleted = value.isdigit() and self.db.delete_resume(user.id, int(value))
+        deleted = value.isascii() and value.isdigit() and self.db.delete_resume(user.id, int(value))
         await self.api.answer_callback(cb["id"], "Удалено" if deleted else "Уже удалено")
         if msg:
             text, markup = self._resumes_view(user)
@@ -1276,7 +1472,7 @@ class Bot:
 
     async def _cb_onboarding(self, user: User, cb: dict, value: str, msg: dict) -> None:
         await self.api.answer_callback(cb["id"])
-        if value == "manual":
+        if value in ("manual", "next") and not user.onboarded:
             self._awaiting.pop(user.id, None)
             self._profile_mode[user.id] = "ob"
             await self._ask_next(user, msg or None)
@@ -1291,7 +1487,12 @@ class Bot:
         if action == "dir" and arg in r.DIRECTIONS:
             note = self._toggle_query(user, r.DIRECTIONS[arg][1])
             rerender = "directions"
-        elif action == "dirx" and arg.isdigit() and int(arg) < len(user.filters.queries):
+        elif (
+            action == "dirx"
+            and arg.isascii()
+            and arg.isdigit()
+            and int(arg) < len(user.filters.queries)
+        ):
             self._toggle_query(user, user.filters.queries[int(arg)])
             rerender = "directions"
         elif action == "custom":
@@ -1302,9 +1503,10 @@ class Bot:
                 "Например: <i>python developer, тестировщик, аналитик данных</i>",
             )
         elif action == "level" and arg in r.LEVEL_BUTTONS:
-            profile.level = arg
-            profile.mark("level")
-            answered = True
+            profile.toggle_level(arg)
+            user.filters.levels = profile.target_levels()
+            self.db.save_filters(user.id, user.filters)
+            rerender = "level"
         elif action == "fmt" and arg in WORK_FORMATS:
             fmts = profile.work_formats
             profile.work_formats = [x for x in fmts if x != arg] if arg in fmts else [*fmts, arg]
@@ -1321,7 +1523,7 @@ class Bot:
             rc = profile.relocation_countries
             profile.relocation_countries = [x for x in rc if x != arg] if arg in rc else [*rc, arg]
             rerender = "relocation_countries"
-        elif action == "sal" and arg.isdigit():
+        elif action == "sal" and arg in {str(v) for v in (0, *SALARY_PRESETS)}:
             profile.salary_usd = int(arg)
             profile.mark("salary")
             answered = True
@@ -1333,7 +1535,11 @@ class Bot:
                 note = "Выберите хотя бы одно направление"
             elif arg == "work_formats" and not profile.work_formats:
                 note = "Выберите хотя бы один формат"
-            else:
+            elif arg == "level" and not profile.target_levels():
+                note = "Выберите хотя бы один уровень"
+            elif arg in ("directions", "level", "work_formats", "relocation_countries"):
+                if arg == "level":
+                    profile.set_levels(profile.target_levels())
                 profile.mark("relocation" if arg == "relocation_countries" else arg)
                 answered = True
         self.db.save_profile(user.id, profile)
@@ -1411,7 +1617,7 @@ class Bot:
                 "<b>🔍 Направления</b>\nЧто ищем? Можно несколько.",
                 self._directions_markup(user, ctx="f"),
             )
-        elif action == "dirx" and arg.isdigit() and int(arg) < len(f.queries):
+        elif action == "dirx" and arg.isascii() and arg.isdigit() and int(arg) < len(f.queries):
             self._toggle_query(user, f.queries[int(arg)])
             await self.edit(
                 msg,
@@ -1426,7 +1632,7 @@ class Bot:
                 f.levels = (
                     [x for x in f.levels if x != arg] if arg in f.levels else [*f.levels, arg]
                 )
-                self.db.save_filters(user.id, f)
+                self._save_filter_edit(user, "levels")
             await self.edit(
                 msg,
                 "<b>🎓 Уровень</b>\nНичего не выбрано — любой.",
@@ -1439,7 +1645,7 @@ class Bot:
                     if arg in f.countries
                     else [*f.countries, arg]
                 )
-                self.db.save_filters(user.id, f)
+                self._save_filter_edit(user, "countries")
             await self.edit(
                 msg,
                 "<b>🌍 Страны</b>\nНичего не выбрано — все.",
@@ -1447,7 +1653,7 @@ class Bot:
             )
         elif action == "remote":
             f.remote_only = not f.remote_only
-            self.db.save_filters(user.id, f)
+            self._save_filter_edit(user, "remote_only")
             text, markup = self._filters_menu(user)
             await self.edit(msg, text, markup)
         elif action == "salary":
@@ -1475,7 +1681,7 @@ class Bot:
                     self.db.save_filters(user.id, f)
             await self.edit(msg, self._sources_text(), self._sources_markup(f))
         elif action == "thr":
-            if arg.isdigit():
+            if arg in ("40", "50", "60", "70", "80"):
                 f.ai_threshold = int(arg)
                 self.db.save_filters(user.id, f)
             options = {str(v): f"{v}" for v in (40, 50, 60, 70, 80)}
