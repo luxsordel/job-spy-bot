@@ -205,7 +205,9 @@ def check(
     if reason := format_reason(v, f):
         return reason
 
-    remote_ok = bool(v.remote) and "REMOTE" in f.countries
+    # «Удалёнка из любой страны»: чужая страна режется, только если вакансия строго офисная.
+    # Формат не указан или гибрид — пропускаем: об удалёнке часто можно договориться.
+    remote_ok = "REMOTE" in f.countries and not office_only(v)
     if f.countries and v.country and v.country not in f.countries and not remote_ok:
         return f"страна {v.country}"
 
@@ -248,6 +250,14 @@ def city_variants(city: str) -> tuple[str, ...]:
         if key == canon or key in variants:
             return variants
     return (key,) if key else ()
+
+
+def office_only(v: Vacancy) -> bool:
+    """Площадка прямо пишет, что работа только в офисе."""
+    formats = set(v.work_formats)
+    if v.remote:
+        return False
+    return formats == {"office"} or (not formats and v.remote is False)
 
 
 def format_reason(v: Vacancy, f: UserFilters) -> str | None:
