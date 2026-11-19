@@ -1,0 +1,7 @@
+{"data": [{"guid": "g1", "slug": "rits-python-developer-krakow-python", "title": "Python Developer",
+  "workplaceType": "remote", "experienceLevel": "mid", "city": "Kraków", "companyName": "RITS",
+  "publishedAt": "2026-11-20T09:15:06.653Z", "requiredSkills": [{"name": "Python"}, {"name": "Django"}],
+  "employmentTypes": [
+    {"from": 7000, "to": 8000, "currency": "USD", "currencySource": "conversion", "unit": "month"},
+    {"from": 170, "to": 175, "currency": "PLN", "currencySource": "original", "unit": "hour"}]}],
+ "meta": {"totalItems": 1}}

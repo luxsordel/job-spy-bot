@@ -1,0 +1,7 @@
+{"meta": {"total": 1}, "offers": [{"id": 37223, "is_active": true, "position": "Python Backend Developer",
+  "url": "/vacancies/37223-python", "company": {"name": "VK"}, "published_at": "2026-11-11T08:52:04.397422",
+  "salary_display_from": 338000, "salary_display_to": 494000, "salary_currency": "RUB",
+  "offer_description": "<b>Что делать:</b> писать <i>сервисы</i>",
+  "skills_objects": [{"title": "Python"}],
+  "location_requirements": [{"format": "remote", "city": "Москва", "country": "Россия"}]},
+  {"id": 1, "is_active": false, "position": "Closed", "url": "/v/1", "company": {}, "location_requirements": []}]}

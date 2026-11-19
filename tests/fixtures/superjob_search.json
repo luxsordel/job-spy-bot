@@ -1,0 +1,4 @@
+{"objects": [{"id": 555, "profession": "Python-разработчик", "link": "https://www.superjob.ru/vakansii/555.html",
+  "firm_name": "Рога и копыта", "town": {"title": "Москва"}, "place_of_work": {"id": 2},
+  "payment_from": 150000, "payment_to": 0, "currency": "rub", "experience": {"id": 2},
+  "candidat": "Опыт с Django", "vacancyRichText": "<p>Опыт с Django</p>", "date_published": 1795000000}]}

@@ -1,0 +1,11 @@
+{"postings": [
+ {"id": "lead-python-remote", "name": "Makeitright", "title": "Lead Python Developer", "url": "lead-python-remote",
+  "location": {"places": [{"city": "Remote"}], "fullyRemote": true}, "posted": 1795087480503,
+  "salary": {"from": 150.0, "to": 160.0, "currency": "PLN", "period": "Hour"}, "seniority": ["Expert"],
+  "technology": "Python"},
+ {"id": "lead-python-remote", "name": "Makeitright", "title": "Lead Python Developer", "url": "lead-python-remote",
+  "location": {"places": [{"city": "Warszawa"}], "fullyRemote": true}, "posted": 1795087480503,
+  "salary": {"from": 150.0, "to": 160.0, "currency": "PLN", "period": "Hour"}, "seniority": ["Expert"]},
+ {"id": "junior-py", "name": "Innowise", "title": "Junior Python", "url": "junior-py",
+  "location": {"places": [{"city": "Warsaw"}]}, "posted": 1795087480503,
+  "salary": {"from": 8000.0, "to": 10000.0, "currency": "PLN", "period": "Month"}, "seniority": ["Junior"]}]}
