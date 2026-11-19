@@ -166,11 +166,13 @@ class AIService:
         self.llm = llm
         self.settings = settings
         self.describe: Describe | None = None
+        #: дневной лимит токенов для пользователя (зависит от тарифа)
+        self.token_limit: Callable[[User], int] = lambda _user: settings.daily_tokens_per_user
 
     # --- бюджет --------------------------------------------------------------
 
     def has_budget(self, user: User) -> bool:
-        return self.db.tokens_today(user.id) < self.settings.daily_tokens_per_user
+        return self.db.tokens_today(user.id) < self.token_limit(user)
 
     async def _ask(self, user: User, system: str, prompt: str, **kw: Any) -> str:
         reply = await self.llm.chat(system, prompt, **kw)
