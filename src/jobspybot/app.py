@@ -6,9 +6,12 @@ import asyncio
 import contextlib
 import logging
 import signal
+from typing import Any
 
+from jobspybot.ai.client import LLMClient
+from jobspybot.ai.service import AIService
 from jobspybot.config import ConfigError, Settings
-from jobspybot.db import Database
+from jobspybot.db import Database, User
 from jobspybot.http import Http
 from jobspybot.pipeline import Pipeline
 from jobspybot.sources import REGISTRY, build_sources
@@ -16,6 +19,22 @@ from jobspybot.telegram.api import TelegramAPI
 from jobspybot.telegram.bot import Bot
 
 log = logging.getLogger(__name__)
+
+
+def wire_ai(bot: Bot, ai: AIService) -> None:
+    """Подключает ИИ к боту: профиль из резюме и кнопка «Письмо» под вакансиями."""
+    bot.on_resume = ai.build_profile
+
+    async def on_letter(user: User, cb: dict[str, Any], value: str) -> None:
+        vacancy = bot.db.delivery_vacancy(user.id, int(value)) if value.isdigit() else None
+        if vacancy is None:
+            await bot.api.answer_callback(cb["id"], "Вакансия уже удалена из базы")
+            return
+        await bot.api.answer_callback(cb["id"], "✍️ Пишу письмо…")
+        text = await ai.cover_letter(user, vacancy)
+        await bot.api.send_message(user.id, f"✉️ {vacancy.title}\n\n{text}", parse_mode=None)
+
+    bot.extra_buttons["cl"] = ("✉️ Письмо", on_letter)
 
 
 async def run(settings: Settings) -> None:
@@ -36,6 +55,16 @@ async def run(settings: Settings) -> None:
 
     bot = Bot(api, db, settings, list(sources))
     pipeline = Pipeline(db, sources, bot, settings)
+    llm: LLMClient | None = None
+    if settings.ai.enabled:
+        llm = LLMClient(settings.ai.base_url, settings.ai.api_key, settings.ai.model)
+        ai = AIService(db, llm, settings.ai)
+        ai.describe = pipeline.describe
+        pipeline.evaluator = ai
+        wire_ai(bot, ai)
+        log.info("AI enabled: model %s", settings.ai.model)
+    else:
+        log.info("AI disabled: set AI_BASE_URL, AI_API_KEY and AI_MODEL to enable")
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -55,6 +84,8 @@ async def run(settings: Settings) -> None:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
+        if llm:
+            await llm.aclose()
         await api.aclose()
         await http.aclose()
         db.close()

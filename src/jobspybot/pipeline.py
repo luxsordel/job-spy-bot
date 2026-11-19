@@ -9,6 +9,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from jobspybot.ai.service import Analysis
 from jobspybot.config import Settings
 from jobspybot.db import Database, User
 from jobspybot.filters import check, local_score
@@ -23,6 +24,10 @@ UNAVAILABLE_BACKOFF = 6 * 3600
 ERROR_BACKOFF = 30 * 60
 
 
+class Evaluator(Protocol):
+    async def evaluate(self, user: User, vacancy: Vacancy) -> Analysis | None: ...
+
+
 class Notifier(Protocol):
     async def send_vacancy(
         self, user: User, vacancy: Vacancy, delivery_id: int, extra: str = ""
@@ -35,6 +40,8 @@ class CycleStats:
     new: int = 0
     sent: int = 0
     filtered: int = 0
+    ai_calls: int = 0
+    ai_rejected: int = 0
     errors: dict[str, str] = field(default_factory=dict)
 
 
@@ -45,12 +52,30 @@ class Pipeline:
         sources: dict[str, Source],
         notifier: Notifier,
         settings: Settings,
+        evaluator: Evaluator | None = None,
     ) -> None:
         self.db = db
         self.sources = sources
         self.notifier = notifier
         self.settings = settings
+        self.evaluator = evaluator
         self._backoff: dict[str, float] = {}
+
+    async def describe(self, vacancy: Vacancy) -> str:
+        """Полное описание (с кэшем в БД). Запрашивается только для прошедших отсев."""
+        if vacancy.description:
+            return vacancy.description
+        stored = self.db.get_vacancy(vacancy.uid)
+        if stored and stored.description:
+            vacancy.description = stored.description
+            return stored.description
+        source = self.sources.get(vacancy.source)
+        if source is None:
+            return vacancy.snippet
+        text = await source.fetch_description(vacancy)
+        vacancy.description = text
+        self.db.set_description(vacancy.uid, text)
+        return text
 
     # --- сбор ----------------------------------------------------------------
 
@@ -159,8 +184,26 @@ class Pipeline:
     async def process_user(
         self, user: User, found: dict[tuple[str, str], list[Vacancy]], stats: CycleStats
     ) -> None:
-        for score, vacancy in self.candidates(user, found, stats):
-            if await self.deliver(user, vacancy, score):
+        candidates = self.candidates(user, found, stats)
+        use_ai = self.evaluator is not None and bool(user.profile)
+        if use_ai:
+            # дорогой этап — только лучшие по локальному баллу, остальные подождут
+            candidates = candidates[: self.settings.ai.max_per_cycle]
+        for score, vacancy in candidates:
+            extra = ""
+            if use_ai:
+                assert self.evaluator is not None
+                analysis = await self.evaluator.evaluate(user, vacancy)
+                if analysis is not None:
+                    stats.ai_calls += 1
+                    if analysis.score < user.filters.ai_threshold or analysis.by == "no":
+                        self.db.record(
+                            user.id, vacancy, "ai_rejected", analysis.verdict, analysis.score
+                        )
+                        stats.ai_rejected += 1
+                        continue
+                    extra = analysis.render()
+            if await self.deliver(user, vacancy, score, extra):
                 stats.sent += 1
 
     async def run_cycle(self) -> CycleStats:
@@ -175,10 +218,12 @@ class Pipeline:
             except Exception:
                 log.exception("processing user %s failed", user.id)
         log.info(
-            "cycle: fetched=%d new=%d filtered=%d sent=%d errors=%s",
+            "cycle: fetched=%d new=%d filtered=%d ai=%d ai_rejected=%d sent=%d errors=%s",
             stats.fetched,
             stats.new,
             stats.filtered,
+            stats.ai_calls,
+            stats.ai_rejected,
             stats.sent,
             list(stats.errors),
         )
