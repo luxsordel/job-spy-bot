@@ -1,0 +1,8 @@
+{"list": [{"id": 1000170506, "href": "/vacancies/1000170506", "title": "Стажировка Python разработчик (FastAPI)",
+  "remoteWork": true, "publishedDate": {"date": "2026-11-19T14:28:27+03:00"},
+  "company": {"title": "Pulsea"}, "salary": {"from": 40000, "to": 60000, "currency": "rur"},
+  "divisions": [{"title": "Бэкенд разработчик"}], "skills": [{"title": "Python"}, {"title": "FastAPI"}],
+  "locations": null, "qualification": "Intern"},
+ {"id": 2, "href": "/vacancies/2", "title": "Senior Go", "remoteWork": false,
+  "publishedDate": {"date": "2026-11-18T10:00:00+03:00"}, "company": {"title": "X"}, "salary": {},
+  "locations": [{"title": "Новосибирск"}], "qualification": "Senior"}]}
