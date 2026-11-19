@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from html import escape
@@ -252,7 +253,10 @@ class AIService:
             reason = "закончился баланс или квота" if no_money else "несколько ошибок подряд"
             self.on_alert("ai", f"🤖 ИИ-провайдер недоступен ({reason}):\n{text[:300]}")
 
-    async def _ask(self, user: User, system: str, prompt: str, **kw: Any) -> str:
+    async def _ask(
+        self, user: User, system: str, prompt: str, *, what: str = "запрос", **kw: Any
+    ) -> str:
+        started = time.monotonic()
         try:
             reply = await self.llm.chat(system, prompt, **kw)
         except LLMError as exc:
@@ -266,7 +270,15 @@ class AIService:
             reply = await self.llm.chat(system, prompt, model=fallback, **kw)
         self._failures = 0
         self.db.add_tokens(user.id, reply.tokens)
-        log.debug("llm user=%s tokens=%d", user.id, reply.tokens)
+        log.info(
+            "ИИ %s для %s: %d токенов за %.1f с, у него за сегодня %s из %s",
+            what,
+            user.id,
+            reply.tokens,
+            time.monotonic() - started,
+            f"{self.db.tokens_today(user.id):,}".replace(",", " "),
+            f"{self.token_limit(user):,}".replace(",", " "),
+        )
         return reply.text
 
     async def _description(self, vacancy: Vacancy) -> str:
@@ -335,6 +347,7 @@ class AIService:
                     user,
                     PROFILE_SYSTEM,
                     redact_contacts(resume.text),
+                    what="разбор резюме",
                     max_tokens=1000,
                     json_mode=True,
                 )
@@ -385,6 +398,7 @@ class AIService:
         key = profiles_hash(resumes, context)
         cached = self.db.get_ai_cache(vacancy.uid, key)
         if cached:
+            log.info("ИИ оценка «%s» для %s: из кэша", vacancy.title[:60], user.id)
             return Analysis(**json.loads(cached))
         if not self.has_budget(user):
             return None
@@ -398,6 +412,7 @@ class AIService:
                     f"{EVAL_SYSTEM}\nКандидат: {context}\n\nРезюме кандидата:\n"
                     + profiles_block(resumes),
                     vacancy_prompt(vacancy, description),
+                    what=f"оценка «{vacancy.title[:60]}»",
                     # с запасом: оплачиваются только реально сгенерированные токены,
                     # а обрезанный посередине JSON — это выброшенный запрос
                     max_tokens=450,
@@ -457,7 +472,12 @@ class AIService:
         )
         try:
             reply = await self._ask(
-                user, PROFILE_EDIT_SYSTEM + current, text[:500], max_tokens=300, json_mode=True
+                user,
+                PROFILE_EDIT_SYSTEM + current,
+                text[:500],
+                what="правка профиля",
+                max_tokens=300,
+                json_mode=True,
             )
             return parse_json(reply)
         except LLMError as exc:
@@ -476,6 +496,7 @@ class AIService:
                 f"{LETTER_SYSTEM}\nКандидат: {self.db.get_profile(user.id).context_line()}\n"
                 f"Профиль кандидата:\n{resume.profile or redact_contacts(resume.text[:3000])}",
                 vacancy_prompt(vacancy, description),
+                what="сопроводительное письмо",
                 max_tokens=600,
                 temperature=0.5,
             )

@@ -23,6 +23,13 @@ from jobspybot.relevance import Fit, mismatch_reason, role_fit, user_families
 from jobspybot.sources import Source, SourceUnavailable
 
 log = logging.getLogger(__name__)
+# поиск по площадкам — отдельный раздел живого лога в админке
+src_log = logging.getLogger("jobspybot.sources")
+
+
+def who(user: User) -> str:
+    return f"{user.id} @{user.username}" if user.username else str(user.id)
+
 
 #: не больше стольких вакансий одному пользователю за цикл — защита от флуда
 MAX_SEND_PER_CYCLE = 15
@@ -89,6 +96,7 @@ class Pipeline:
         self.billing = billing
         self._backoff: dict[str, float] = {}
         self.status: dict[str, SourceStatus] = {name: SourceStatus() for name in sources}
+        self.cycle_started: datetime | None = None  # не None, пока идёт цикл
         self.started_at = datetime.now(UTC)
         #: оповещение админу: (ключ, текст, пауза между повторами в секундах)
         self.on_alert: Alert | None = None
@@ -133,14 +141,24 @@ class Pipeline:
     async def _fetch_source(
         self, name: str, queries: set[str], stats: CycleStats
     ) -> dict[str, list[Vacancy]]:
-        if self._backoff.get(name, 0) > time.monotonic():
+        pause = self._backoff.get(name, 0) - time.monotonic()
+        if pause > 0:
+            src_log.info("%s: пропуск, пауза после ошибки ещё %d мин", name, pause // 60 + 1)
             return {}
         source = self.sources[name]
         status = self.status.setdefault(name, SourceStatus())
         result: dict[str, list[Vacancy]] = {}
         for query in sorted(queries):
+            started = time.monotonic()
             try:
                 result[query] = await source.search(query)
+                src_log.info(
+                    "%s «%s»: %d вакансий за %.1f с",
+                    name,
+                    query,
+                    len(result[query]),
+                    time.monotonic() - started,
+                )
             except SourceUnavailable as exc:
                 log.warning("%s unavailable: %s", name, exc)
                 stats.errors[name] = str(exc)
@@ -327,11 +345,25 @@ class Pipeline:
                             user.id, vacancy, "ai_rejected", analysis.verdict, analysis.score
                         )
                         stats.ai_rejected += 1
+                        log.info(
+                            "ИИ отклонил для %s: «%s» (%d)",
+                            who(user),
+                            vacancy.title[:80],
+                            analysis.score,
+                        )
                         continue
                     extra = analysis.render()
                     ai_score = analysis.score
             if await self.deliver(user, vacancy, score, extra, ai_score, stats):
                 stats.sent += 1
+                log.info(
+                    "→ %s: «%s» (%s, балл %d%s)",
+                    who(user),
+                    vacancy.title[:80],
+                    vacancy.source,
+                    score,
+                    f", ИИ {ai_score}" if ai_score is not None else "",
+                )
 
     # --- отложенные: тихие часы и дайджест ------------------------------------
 
@@ -406,15 +438,36 @@ class Pipeline:
             billing = self.billing
             users = [u for u in users if billing.is_due(u)]
         if not users:
+            log.info("cycle: некого проверять (нет активных пользователей с запросами)")
             return stats
-        found = await self.fetch(users, stats)
-        self.check_silence(sorted(self._plan(users)))
-        for user in users:
-            try:
-                await self.process_user(user, found, stats)
-            except Exception:
-                log.exception("processing user %s failed", user.id)
-            self.db.set_last_check(user.id)
+        plan = self._plan(users)
+        log.info(
+            "cycle start: пользователей %d, площадок %d, запросов %d",
+            len(users),
+            len(plan),
+            sum(len(q) for q in plan.values()),
+        )
+        self.cycle_started = datetime.now(UTC)
+        try:
+            found = await self.fetch(users, stats)
+            log.info("сбор: получено %d, новых %d", stats.fetched, stats.new)
+            self.check_silence(sorted(plan))
+            for user in users:
+                before = (stats.filtered, stats.ai_calls, stats.ai_rejected, stats.sent)
+                try:
+                    await self.process_user(user, found, stats)
+                except Exception:
+                    log.exception("processing user %s failed", user.id)
+                self.db.set_last_check(user.id)
+                after = (stats.filtered, stats.ai_calls, stats.ai_rejected, stats.sent)
+                d = [b - a for a, b in zip(before, after, strict=True)]
+                log.info(
+                    "%s: отсеяно %d, оценил ИИ %d, отклонил ИИ %d, отправлено %d",
+                    who(user),
+                    *d,
+                )
+        finally:
+            self.cycle_started = None
         log.info(
             "cycle: fetched=%d new=%d filtered=%d ai=%d ai_rejected=%d ai_deferred=%d sent=%d"
             " queued=%d errors=%s",

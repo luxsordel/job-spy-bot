@@ -56,6 +56,37 @@ from jobspybot.telegram.api import (
 
 log = logging.getLogger(__name__)
 
+
+def describe_update(update: dict[str, Any]) -> str:
+    """Короткая строка для живого лога: кто и что прислал (без текста сообщений)."""
+    if "callback_query" in update:
+        q = update["callback_query"]
+        kind = f"кнопка {str(q.get('data', ''))[:40]}"
+    elif "message" in update:
+        q = update["message"]
+        text = q.get("text") or ""
+        if text.startswith("/"):
+            kind = text.split()[0][:40]
+        elif text:
+            kind = f"текст, {len(text)} симв."
+        elif "document" in q:
+            kind = "файл"
+        elif "successful_payment" in q:
+            kind = "оплата"
+        else:
+            kind = "сообщение"
+    elif "pre_checkout_query" in update:
+        q, kind = update["pre_checkout_query"], "проверка оплаты"
+    elif "my_chat_member" in update:
+        q = update["my_chat_member"]
+        kind = f"статус чата: {(q.get('new_chat_member') or {}).get('status', '?')}"
+    else:
+        return "неизвестное обновление"
+    sender = q.get("from") or {}
+    name = f" @{sender['username']}" if sender.get("username") else ""
+    return f"{sender.get('id', '?')}{name}: {kind}"
+
+
 COMMANDS = [
     ("start", "Главное меню"),
     ("search", "Мой поиск"),
@@ -270,6 +301,7 @@ class Bot:
     # --- входящие ------------------------------------------------------------
 
     async def handle_update(self, update: dict[str, Any]) -> None:
+        log.info("← %s", describe_update(update))
         if await self._throttled(update):
             return
         if "callback_query" in update:

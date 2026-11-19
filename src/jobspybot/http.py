@@ -67,12 +67,13 @@ class Http:
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 if attempt == self._retries:
                     raise
-                log.debug("%s %s: %s, retry %d", method, url, exc, attempt)
+                log.info("%s %s: %r, повтор %d", method, url[:120], exc, attempt)
             else:
                 if resp.status_code < 400:
                     return resp
                 if resp.status_code not in RETRY_STATUSES or attempt == self._retries:
                     raise HttpError(resp.status_code, str(resp.url), resp.text)
+                log.info("%s %s: HTTP %d, повтор %d", method, url[:120], resp.status_code, attempt)
                 retry_after = resp.headers.get("Retry-After", "")
                 if retry_after.isdigit():
                     delay = max(delay, min(float(retry_after), 60.0))
