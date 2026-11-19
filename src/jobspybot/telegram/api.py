@@ -57,7 +57,7 @@ class TelegramAPI:
             "getUpdates",
             offset=offset,
             timeout=timeout,
-            allowed_updates=["message", "callback_query", "pre_checkout_query"],
+            allowed_updates=["message", "callback_query", "pre_checkout_query", "my_chat_member"],
         )
 
     async def send_message(

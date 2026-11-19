@@ -200,3 +200,12 @@ async def test_api_backup(web, tmp_path):
     tg = web.bot.api._client._transport.handler
     (upload,) = [p for m, p in tg.calls if m == "sendDocument"]
     assert data["file"] in upload["multipart"] and str(ADMIN) in upload["multipart"]
+
+
+async def test_admin_api_reset(web, db):
+    onboarded_user(db, GUEST, queries=["qa"])
+    db.add_resume(GUEST, "CV", "Аналитик: BPMN, SQL, EPC. " * 5)
+    status, _ = await api(web, "POST", "/api/user", {"id": GUEST, "action": "reset"})
+    assert status == 200
+    user = db.get_user(GUEST)
+    assert not user.onboarded and user.allowed and db.get_resumes(GUEST) == []
