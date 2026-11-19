@@ -327,6 +327,28 @@ PATCH_KEYS = (
 )
 
 
+def _experience(value: Any) -> float | None:
+    """Лет опыта из ответа ИИ: число 0–60 с точностью до десятых, иначе None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        years = float(str(value).replace(",", "."))
+    except ValueError:
+        return None
+    return round(years, 1) if 0 <= years < 60 else None
+
+
+def _years_word(years: float) -> str:
+    if years != int(years):
+        return "года"
+    n = int(years)
+    if n % 10 == 1 and n % 100 != 11:
+        return "год"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "года"
+    return "лет"
+
+
 def apply_patch(
     p: UserProfile, f: UserFilters, patch: dict[str, Any], *, max_queries: int
 ) -> list[str]:
@@ -380,6 +402,11 @@ def apply_patch(
             p.salary_usd = salary
             p.mark("salary")
             changes.append(f"зарплата от {p.salary_usd}$" if p.salary_usd else "зарплата не важна")
+    if "experience_years" in patch:
+        years = _experience(patch["experience_years"])
+        if years is not None:
+            p.experience_years = years
+            changes.append(f"опыт: {years:g} {_years_word(years)}")
     if isinstance(patch.get("wishes"), str):
         p.wishes = clean_text(patch["wishes"], MAX_WISHES_LEN)
         changes.append(f"пожелания: {p.wishes}" if p.wishes else "пожелания очищены")
