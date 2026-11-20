@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from html import escape
 from typing import Any
 
@@ -85,6 +87,21 @@ def describe_update(update: dict[str, Any]) -> str:
     sender = q.get("from") or {}
     name = f" @{sender['username']}" if sender.get("username") else ""
     return f"{sender.get('id', '?')}{name}: {kind}"
+
+
+def update_sender(update: dict[str, Any]) -> int:
+    """Кто прислал обновление (0 — не удалось понять: такие идут общей очередью)."""
+    for key in ("message", "callback_query", "pre_checkout_query", "my_chat_member"):
+        if key in update:
+            sender = update[key].get("from") or {}
+            uid = sender.get("id")
+            return uid if isinstance(uid, int) else 0
+    return 0
+
+
+#: как часто обновлять «🤔 Думаю…», пока ИИ работает (секунды)
+THINKING_TICK = 4.0
+_THINKING_DOTS = ("", ".", "..", "...")
 
 
 COMMANDS = [
@@ -202,6 +219,12 @@ class Bot:
         #: время (date из Telegram) последнего очень длинного сообщения пользователя
         self._long_text_at: dict[int, int] = {}
         self.limiter = RateLimiter(settings.guard.rate_limit_per_min)
+        #: обработка обновлений: по задаче на обновление, по замку на человека
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._locks: dict[int, tuple[asyncio.Lock, int]] = {}
+        self._ai_notified: dict[int, str] = {}
+        #: шаг анимации «думаю…» (подменяется в тестах)
+        self.thinking_tick = THINKING_TICK
         self._menu_actions: dict[str, Callable[[User], Awaitable[None]]] = {
             r.BTN_SEARCH: self.show_search,
             r.BTN_RESUMES: self.show_resumes,
@@ -234,10 +257,29 @@ class Bot:
                 continue
             for update in merge_split_messages(updates):
                 offset = update["update_id"] + 1
-                try:
-                    await self.handle_update(update)
-                except Exception:
-                    log.exception("update %s failed", update.get("update_id"))
+                # у каждого человека своя очередь: пока ИИ полминуты читает чьё-то резюме,
+                # остальные не ждут; сообщения одного человека — строго по порядку
+                task = asyncio.create_task(self._handle_in_order(update))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+        if self._tasks:
+            await asyncio.wait(self._tasks, timeout=30)
+
+    async def _handle_in_order(self, update: dict[str, Any]) -> None:
+        uid = update_sender(update)
+        lock, waiting = self._locks.get(uid) or (asyncio.Lock(), 0)
+        self._locks[uid] = (lock, waiting + 1)
+        try:
+            async with lock:
+                await self.handle_update(update)
+        except Exception:
+            log.exception("update %s failed", update.get("update_id"))
+        finally:
+            lock, waiting = self._locks[uid]
+            if waiting <= 1:
+                del self._locks[uid]  # очередь пуста — замок не копится в памяти
+            else:
+                self._locks[uid] = (lock, waiting - 1)
 
     # --- рассылка ------------------------------------------------------------
 
@@ -253,6 +295,22 @@ class Bot:
         await self.api.send_message(
             user.id, r.vacancy_card(vacancy, extra), reply_markup=inline_keyboard(row)
         )
+
+    async def ai_limit_reached(self, user: User) -> None:
+        """Раз в день: лимит ИИ кончился — вакансии без оценки не шлём, они подождут."""
+        today = utcnow().date().isoformat()
+        if self._ai_notified.get(user.id) == today:
+            return
+        self._ai_notified[user.id] = today
+        text = (
+            "🤖 На сегодня лимит ИИ-оценки исчерпан. Вакансии без оценки я не присылаю — "
+            "они подождут и придут после полуночи (UTC), уже с оценкой."
+        )
+        markup = None
+        if self.billing.plan(user) is not PRO:
+            text += "\nВ 💎 Pro лимит ИИ намного больше."
+            markup = inline_keyboard([button("💎 Подробнее о Pro", data="plan:show")])
+        await self.reply(user, text, markup)
 
     async def daily_limit_reached(self, user: User) -> None:
         """Один раз в день сообщает Free-пользователю, что лимит вакансий исчерпан."""
@@ -375,6 +433,47 @@ class Bot:
         except TelegramError as exc:
             if "not modified" not in exc.description:
                 raise
+
+    @contextlib.asynccontextmanager
+    async def thinking(self, user: User, text: str = "🤔 Думаю") -> AsyncIterator[None]:
+        """Пока ИИ работает, человек видит «печатает…» и сообщение с секундомером —
+        понятно, что бот не завис. Когда ответ готов, сообщение удаляется."""
+        started = time.monotonic()
+        note: dict[str, Any] | None = None
+        try:
+            sent = await self.api.send_message(user.id, f"{text}…")
+            note = {"chat": {"id": user.id}, "message_id": sent["message_id"]}
+        except Exception as exc:
+            log.info("thinking note to %s failed: %r", user.id, exc)
+        done = asyncio.Event()
+
+        async def pulse() -> None:
+            step = 0
+            while not done.is_set():
+                with contextlib.suppress(Exception):
+                    await self.api.call("sendChatAction", chat_id=user.id, action="typing")
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(done.wait(), self.thinking_tick)
+                    return
+                step += 1
+                if note is not None:
+                    secs = int(time.monotonic() - started)
+                    dots = _THINKING_DOTS[step % len(_THINKING_DOTS)]
+                    with contextlib.suppress(Exception):
+                        await self.edit(note, f"{text}… {secs} с{dots}", None)
+
+        task = asyncio.create_task(pulse())
+        try:
+            yield
+        finally:
+            done.set()
+            with contextlib.suppress(Exception):
+                await task
+            if note is not None:
+                with contextlib.suppress(Exception):
+                    await self.api.call(
+                        "deleteMessage", chat_id=user.id, message_id=note["message_id"]
+                    )
 
     async def handle_message(self, msg: dict[str, Any]) -> None:
         chat = msg.get("chat") or {}
@@ -812,7 +911,8 @@ class Bot:
                 "файлом PDF.",
             )
             return
-        patch = await self.on_profile_edit(user, text)
+        async with self.thinking(user, "🤔 Разбираю, что поменять"):
+            patch = await self.on_profile_edit(user, text)
         if patch is None:
             await self.reply(
                 user, "ИИ сейчас недоступен — поменяйте настройки кнопками в 👤 Профиль."
@@ -1428,8 +1528,8 @@ class Bot:
         """Разбор резюме ИИ. Удалось — краткое содержание для карточки профиля (её
         покажет вызывающий, одним сообщением); нет — ответ ИИ-модуля уходит как есть."""
         assert self.on_resume is not None
-        await self.reply(user, f"⏳ Читаю «{escape(resume.title)}»…")
-        answer = await self.on_resume(user, resume)
+        async with self.thinking(user, f"⏳ Читаю «{escape(resume.title)}»"):
+            answer = await self.on_resume(user, resume)
         parsed = self.db.get_resume(user.id, resume.id)
         if parsed is None or not parsed.profile:
             await self.reply(user, answer)
