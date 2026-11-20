@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
+from jobspybot.geo import eligible, regions_text
 from jobspybot.limits import safe_salary
 from jobspybot.models import Level, Vacancy
 
@@ -211,6 +212,10 @@ def check(
     if f.countries and v.country and v.country not in f.countries and not remote_ok:
         return f"страна {v.country}"
 
+    # удалёнка с ограничением по странам: «только США и Канада» гражданину РБ не подходит
+    if v.regions and v.remote is not False and eligible(v.regions, candidate_countries(f)) is False:
+        return f"удалёнка только: {regions_text(v.regions)}"
+
     if f.min_salary_usd:
         usd = to_usd(v.salary_to or v.salary_from, v.currency)
         if usd is None:
@@ -250,6 +255,12 @@ def city_variants(city: str) -> tuple[str, ...]:
         if key == canon or key in variants:
             return variants
     return (key,) if key else ()
+
+
+def candidate_countries(f: UserFilters) -> list[str]:
+    """Страны, откуда кандидат может работать: проживание и страны релокации."""
+    codes = [f.home_country, *f.countries]
+    return [c for c in dict.fromkeys(codes) if c and c != "REMOTE"] or ["BY"]
 
 
 def office_only(v: Vacancy) -> bool:

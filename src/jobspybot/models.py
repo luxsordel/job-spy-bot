@@ -73,6 +73,9 @@ class Vacancy:
     work_formats: tuple[str, ...] = field(default_factory=tuple)
     #: адрес / метро, если площадка их отдаёт
     address: str = ""
+    #: удалёнка: откуда можно работать, как написала площадка («Worldwide», «USA, Canada»);
+    #: пусто — неизвестно
+    regions: tuple[str, ...] = field(default_factory=tuple)
     description: str | None = None  # заполняется лениво, только для прошедших отсев
 
     @property
@@ -99,6 +102,7 @@ class Vacancy:
         data["level"] = self.level.value if self.level else None
         data["skills"] = list(self.skills)
         data["work_formats"] = list(self.work_formats)
+        data["regions"] = list(self.regions)
         data["published_at"] = self.published_at.isoformat() if self.published_at else None
         return data
 
@@ -108,6 +112,7 @@ class Vacancy:
         data["level"] = Level(data["level"]) if data.get("level") else None
         data["skills"] = tuple(data.get("skills") or ())
         data["work_formats"] = tuple(data.get("work_formats") or ())
+        data["regions"] = tuple(data.get("regions") or ())
         if data.get("published_at"):
             data["published_at"] = datetime.fromisoformat(data["published_at"])
         return cls(**data)
