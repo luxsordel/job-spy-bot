@@ -124,6 +124,25 @@ async def test_api_restart(web, runtime):
     assert runtime.restart_requested and runtime.stop.is_set()
 
 
+async def test_api_cycle_force_ignores_plan_interval(web, db):
+    from jobspybot.filters import UserFilters
+
+    onboarded_user(db, GUEST)
+    db.save_filters(GUEST, UserFilters(queries=["python"]))
+    db.set_last_check(GUEST)  # только что проверяли — обычный цикл пропустит
+    source = web.pipeline.sources["a"]
+
+    status, data = await api(web, "POST", "/api/cycle")
+    assert status == 200 and data["force"] is False and source.calls == []
+
+    status, data = await api(web, "POST", "/api/cycle", {"force": True})
+    assert status == 200 and data["force"] is True and source.calls == ["python"]
+
+    web.pipeline.cycle_started = web.pipeline.started_at
+    status, data = await api(web, "POST", "/api/cycle", {"force": True})
+    assert status == 409 and source.calls == ["python"]
+
+
 async def test_api_user_shows_why_vacancies_were_filtered(web, db):
     onboarded_user(db, GUEST, queries=["вайбкодер"])
     v = vac("a", "1", "Бизнес-аналитик")

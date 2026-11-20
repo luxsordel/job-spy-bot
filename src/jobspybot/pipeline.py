@@ -444,10 +444,12 @@ class Pipeline:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=every)
 
-    async def run_cycle(self) -> CycleStats:
+    async def run_cycle(self, *, force: bool = False) -> CycleStats:
+        """Цикл поиска. `force` — проверить всех сразу, не дожидаясь интервала тарифа
+        (внеочередной запуск из админки после деплоя)."""
         stats = CycleStats()
         users = [u for u in self.db.active_users() if u.filters.queries]
-        if self.billing:
+        if self.billing and not force:
             # бесплатный тариф проверяется реже
             billing = self.billing
             users = [u for u in users if billing.is_due(u)]

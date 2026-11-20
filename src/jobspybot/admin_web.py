@@ -399,7 +399,7 @@ API_ENDPOINTS = [
     "GET /api/config",
     "POST /api/config {KEY: value}",
     "POST /api/restart",
-    "POST /api/cycle",
+    "POST /api/cycle {force: true — проверить всех, не дожидаясь интервала}",
     "GET /api/users?q=",
     "GET /api/user?id=ID",
     "POST /api/user {id, action: grant|allow|deny|ban|unban|pause|unpause|reset|message|"
@@ -1249,8 +1249,12 @@ class AdminWeb:
         if (m, path) == ("POST", "/cycle"):
             if self.pipeline is None:
                 return json_response({"error": "pipeline not attached"}, 409)
-            stats = await self.pipeline.run_cycle()
-            return json_response({"ok": True, "stats": stats.__dict__})
+            if self.pipeline.cycle_started:
+                return json_response({"error": "cycle already running"}, 409)
+            force = req.json().get("force") is True
+            log.warning("admin api: cycle requested%s", " (force)" if force else "")
+            stats = await self.pipeline.run_cycle(force=force)
+            return json_response({"ok": True, "force": force, "stats": stats.__dict__})
         if (m, path) == ("GET", "/backups"):
             return json_response(self._backups_json())
         if (m, path) == ("POST", "/backup"):
