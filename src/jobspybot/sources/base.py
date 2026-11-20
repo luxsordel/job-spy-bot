@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+import time
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
@@ -46,6 +48,84 @@ class Source(ABC):
     async def fetch_description(self, vacancy: Vacancy) -> str:
         """Полное описание вакансии. Вызывается только для прошедших первичный отсев."""
         return vacancy.description or vacancy.snippet
+
+
+#: слова запроса, которые есть почти в каждом названии — по ним одним не ищем
+_GENERIC = frozenset(
+    {
+        "developer",
+        "engineer",
+        "programmer",
+        "specialist",
+        "разработчик",
+        "программист",
+        "инженер",
+        "специалист",
+        "remote",
+        "удаленно",
+        "junior",
+        "middle",
+        "senior",
+        "lead",
+    }
+)
+_WORD = re.compile(r"[\w+#]+(?:\.[\w]+)*")
+
+
+def query_words(query: str) -> list[str]:
+    words = _WORD.findall(query.lower().replace("ё", "е"))
+    return [w for w in words if w not in _GENERIC] or words
+
+
+_CYRILLIC = re.compile(r"[а-я]")
+
+
+def matches_query(query: str, text: str) -> bool:
+    """Все значимые слова запроса есть в тексте.
+
+    Латиница — целым словом («java» не находит «javascript»), кириллица — с начала слова,
+    чтобы «аналитик» находил «аналитика» и «аналитиков».
+    """
+    words = query_words(query)
+    hay = " " + " ".join(_WORD.findall(text.lower().replace("ё", "е"))) + " "
+
+    def found(word: str) -> bool:
+        return f" {word}" in hay if _CYRILLIC.search(word) else f" {word} " in hay
+
+    return bool(words) and all(found(w) for w in words)
+
+
+class FeedSource(Source):
+    """Площадка без поиска: забираем общую ленту раз в `feed_ttl` и фильтруем у себя.
+
+    Так на площадку уходит один запрос на цикл, сколько бы запросов ни было у пользователей.
+    """
+
+    #: как долго лента считается свежей, секунд
+    feed_ttl: ClassVar[float] = 20 * 60
+
+    def __init__(self, http: Http, settings: Settings) -> None:
+        super().__init__(http, settings)
+        self._feed: list[Vacancy] = []
+        self._fetched_at = float("-inf")
+
+    @abstractmethod
+    async def fetch_feed(self) -> list[Vacancy]:
+        """Вся свежая лента площадки."""
+
+    async def feed(self) -> list[Vacancy]:
+        if time.monotonic() - self._fetched_at > self.feed_ttl:
+            self._feed = await self.fetch_feed()
+            self._fetched_at = time.monotonic()
+        return self._feed
+
+    async def search(self, query: str) -> list[Vacancy]:
+        found = [v for v in await self.feed() if matches_query(query, self.haystack(v))]
+        return found[: self.page_size]
+
+    def haystack(self, v: Vacancy) -> str:
+        """Где искать слова запроса: название и теги."""
+        return " ".join((v.title, " ".join(v.skills)))
 
 
 def register(cls: type[Source]) -> type[Source]:

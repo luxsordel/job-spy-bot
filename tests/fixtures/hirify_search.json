@@ -1,0 +1,270 @@
+{
+ "current_page": 1,
+ "total": 4,
+ "data": [
+  {
+   "id": 1448753,
+   "slug": "1448753-python-developer-middlesenior-ai-powered-products",
+   "title": "Python Developer (Middle/Senior) AI-Powered Products",
+   "company_title": "SoftBee",
+   "work_format": [
+    "remote"
+   ],
+   "location_scope": "anywhere",
+   "remote_type": "global",
+   "eligible_countries": [],
+   "ineligible_countries": [],
+   "regions": [],
+   "cities": [],
+   "salary": {
+    "id": 596697,
+    "vacancy_id": 1448753,
+    "currency": "USD",
+    "salary_period": "hour",
+    "min": 25,
+    "max": 25,
+    "salary_in_usd": 4000,
+    "created_at": "2026-11-20T06:25:00.000000Z",
+    "updated_at": "2026-11-20T06:25:00.000000Z"
+   },
+   "grades": [
+    {
+     "id": 3,
+     "name": "middle"
+    },
+    {
+     "id": 4,
+     "name": "senior"
+    }
+   ],
+   "tags": [
+    {
+     "id": 23,
+     "name": "ai"
+    },
+    {
+     "id": 45,
+     "name": "python"
+    },
+    {
+     "id": 189,
+     "name": "rest api"
+    },
+    {
+     "id": 397,
+     "name": "celery"
+    }
+   ],
+   "tldr": "Python Developer (Middle/Senior) AI-Powered Products (Python/LLM/RAG): Building and maintaining backend services, REST APIs, and integrations for SaaS",
+   "created_at": "2026-11-20T06:24:59.000000Z"
+  },
+  {
+   "id": 1449363,
+   "slug": "1449363-python-developer-fastapi",
+   "title": "Python Developer (FastAPI)",
+   "company_title": null,
+   "work_format": [
+    "remote"
+   ],
+   "location_scope": "restricted",
+   "remote_type": "russia",
+   "eligible_countries": [
+    "russia"
+   ],
+   "ineligible_countries": [],
+   "regions": [
+    {
+     "id": 1,
+     "code": "russia",
+     "name": "Россия",
+     "name_en": "Russia"
+    }
+   ],
+   "cities": [],
+   "salary": {
+    "id": 596845,
+    "vacancy_id": 1449363,
+    "currency": "RUB",
+    "salary_period": "month",
+    "min": 100000,
+    "max": 200000,
+    "salary_in_usd": 1829,
+    "created_at": "2026-11-20T09:00:34.000000Z",
+    "updated_at": "2026-11-20T09:00:34.000000Z"
+   },
+   "grades": [
+    {
+     "id": 3,
+     "name": "middle"
+    },
+    {
+     "id": 4,
+     "name": "senior"
+    }
+   ],
+   "tags": [
+    {
+     "id": 23,
+     "name": "ai"
+    },
+    {
+     "id": 45,
+     "name": "python"
+    },
+    {
+     "id": 111,
+     "name": "fastapi"
+    },
+    {
+     "id": 112,
+     "name": "docker"
+    }
+   ],
+   "tldr": "Python Developer (FastAPI): Разработка и интеграция REST API, микросервисов и сторонних сервисов на Python с акцентом на асинхронное программирование,",
+   "created_at": "2026-11-20T09:00:31.000000Z"
+  },
+  {
+   "id": 1447915,
+   "slug": "1447915-senior-python-ai-developer",
+   "title": "Senior Python AI Developer (Generative & Agentic AI)",
+   "company_title": "%hirify_global%",
+   "work_format": [
+    "hybrid"
+   ],
+   "location_scope": "restricted",
+   "remote_type": "europe",
+   "eligible_countries": [
+    "united_kingdom"
+   ],
+   "ineligible_countries": [],
+   "regions": [
+    {
+     "id": 4,
+     "code": "united_kingdom",
+     "name": "Великобритания",
+     "name_en": "United Kingdom"
+    }
+   ],
+   "cities": [
+    {
+     "id": 49,
+     "code": "london",
+     "name": "Лондон",
+     "name_en": "London",
+     "country_code": "united_kingdom",
+     "pivot": {
+      "vacancy_id": 1447915,
+      "city_id": 49
+     }
+    }
+   ],
+   "salary": {
+    "id": 596446,
+    "vacancy_id": 1447915,
+    "currency": "GBP",
+    "salary_period": "year",
+    "min": 60000,
+    "max": 75000,
+    "salary_in_usd": 7378,
+    "created_at": "2026-11-20T01:55:45.000000Z",
+    "updated_at": "2026-11-20T01:55:45.000000Z"
+   },
+   "grades": [
+    {
+     "id": 4,
+     "name": "senior"
+    }
+   ],
+   "tags": [
+    {
+     "id": 23,
+     "name": "ai"
+    },
+    {
+     "id": 45,
+     "name": "python"
+    },
+    {
+     "id": 111,
+     "name": "fastapi"
+    },
+    {
+     "id": 181,
+     "name": "devops"
+    }
+   ],
+   "tldr": "Senior Python AI Developer (Generative & Agentic AI) (Python/FastAPI/AWS/LLMs/RAG): Building enterprise-scale Generative and Agentic AI applications a",
+   "created_at": "2026-11-20T01:55:42.000000Z"
+  },
+  {
+   "id": 1437178,
+   "slug": "1437178-junior-java-developer",
+   "title": "Junior Java Developer",
+   "company_title": "Ontory",
+   "work_format": [
+    "remote"
+   ],
+   "location_scope": "restricted",
+   "remote_type": "russia",
+   "eligible_countries": [
+    "armenia",
+    "azerbaijan",
+    "belarus",
+    "kazakhstan",
+    "kyrgyzstan",
+    "moldova",
+    "russia",
+    "tajikistan",
+    "turkmenistan",
+    "uzbekistan"
+   ],
+   "ineligible_countries": [],
+   "regions": [
+    {
+     "id": 1,
+     "code": "russia",
+     "name": "Россия",
+     "name_en": "Russia"
+    }
+   ],
+   "cities": [],
+   "salary": {
+    "id": 591436,
+    "vacancy_id": 1437178,
+    "currency": "RUB",
+    "salary_period": "month",
+    "min": 80000,
+    "max": 105000,
+    "salary_in_usd": 1123,
+    "created_at": "2026-11-18T18:42:35.000000Z",
+    "updated_at": "2026-11-18T18:42:35.000000Z"
+   },
+   "grades": [
+    {
+     "id": 2,
+     "name": "junior"
+    }
+   ],
+   "tags": [
+    {
+     "id": 24,
+     "name": "java"
+    },
+    {
+     "id": 46,
+     "name": "sql"
+    },
+    {
+     "id": 55,
+     "name": "backend"
+    },
+    {
+     "id": 66,
+     "name": "spring"
+    }
+   ],
+   "tldr": "Junior Java Developer (Java/backend): Разработка и доработка backend на Java, нового функционала, API-интеграций и взаимодействий с базами данных с ак",
+   "created_at": "2026-11-18T18:42:34.000000Z"
+  }
+ ]
+}

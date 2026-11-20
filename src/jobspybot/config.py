@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +73,7 @@ EDITABLE_KEYS = (
     "POLL_INTERVAL_MIN",
     "MAX_VACANCY_AGE_DAYS",
     "ENABLED_SOURCES",
+    "TG_CHANNELS",
     "LOG_LEVEL",
     "SUPERJOB_API_KEY",
     "AI_BASE_URL",
@@ -130,6 +132,41 @@ def _int(env: Mapping[str, str], key: str, default: int) -> int:
 
 def _csv(env: Mapping[str, str], key: str) -> list[str]:
     return [p.strip() for p in env.get(key, "").split(",") if p.strip()]
+
+
+#: открытые Telegram-каналы с вакансиями, проверенные 2026-11-20: отдают веб-превью t.me/s/
+DEFAULT_TG_CHANNELS = (
+    "geekjobs",
+    "forproducts",
+    "jobforjunior",
+    "it_vakansii_jobs",
+    "pythonrabota",
+    "remocate",
+    "datasciencejobs",
+    "analysts_jobs",
+    "hrlunapark",
+    "normrabota",
+)
+_TG_CHANNEL = re.compile(r"[A-Za-z][A-Za-z0-9_]{3,31}")
+MAX_TG_CHANNELS = 30
+
+
+def _tg_channels(env: Mapping[str, str]) -> tuple[str, ...]:
+    """TG_CHANNELS: имена каналов через запятую (можно с @ или ссылкой t.me/…); «-» — выключить."""
+    raw = env.get("TG_CHANNELS", "").strip()
+    if not raw:
+        return DEFAULT_TG_CHANNELS
+    if raw in ("-", "none", "off"):
+        return ()
+    names = []
+    for part in _csv(env, "TG_CHANNELS"):
+        name = part.rsplit("/", 1)[-1].lstrip("@")
+        if not _TG_CHANNEL.fullmatch(name):
+            raise ConfigError(f"TG_CHANNELS: «{part}» — не имя публичного канала")
+        names.append(name.lower())
+    if len(names) > MAX_TG_CHANNELS:
+        raise ConfigError(f"TG_CHANNELS: не больше {MAX_TG_CHANNELS} каналов")
+    return tuple(dict.fromkeys(names))
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +254,7 @@ class Settings:
     poll_interval_min: int = 30
     max_vacancy_age_days: int = 7
     enabled_sources: frozenset[str] = frozenset()  # пусто = все
+    tg_channels: tuple[str, ...] = DEFAULT_TG_CHANNELS
     superjob_api_key: str = ""
     http_timeout: float = 20.0
     user_agent: str = USER_AGENT
@@ -245,6 +283,7 @@ class Settings:
             poll_interval_min=_int(env, "POLL_INTERVAL_MIN", 30),
             max_vacancy_age_days=_int(env, "MAX_VACANCY_AGE_DAYS", 7),
             enabled_sources=frozenset(s.lower() for s in _csv(env, "ENABLED_SOURCES")),
+            tg_channels=_tg_channels(env),
             superjob_api_key=env.get("SUPERJOB_API_KEY", "").strip(),
             log_level=(env.get("LOG_LEVEL", "").strip() or "INFO").upper(),
             billing=BillingSettings(

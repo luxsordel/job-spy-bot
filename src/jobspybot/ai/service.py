@@ -31,6 +31,7 @@ from jobspybot.ai.compress import compress_description
 from jobspybot.config import AISettings
 from jobspybot.db import Application, Database, Resume, User, utcnow
 from jobspybot.filters import LEVEL_TITLES, local_score
+from jobspybot.geo import regions_text
 from jobspybot.models import Vacancy
 from jobspybot.resume_files import redact_contacts
 
@@ -206,6 +207,8 @@ def vacancy_prompt(v: Vacancy, description: str) -> str:
         f"Компания: {v.company or '—'}",
         f"Локация: {v.location or '—'}{' (удалённо)' if v.remote else ''}",
     ]
+    if v.regions:
+        head.append(f"Откуда можно работать: {regions_text(v.regions, 200)}")
     if v.address:
         head.append(f"Адрес: {v.address}")
     if v.work_formats:
