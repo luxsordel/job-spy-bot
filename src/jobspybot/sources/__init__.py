@@ -16,6 +16,7 @@ from jobspybot.sources import (  # noqa: F401
     remotecom,
     remoteok,
     superjob,
+    telegram_channels,
     weworkremotely,
     workingnomads,
 )
@@ -34,6 +35,7 @@ SOURCE_ORDER = (
     "justjoin",
     "nofluffjobs",
     "hirify",
+    "telegram",
     "remotecom",
     "himalayas",
     "remoteok",
