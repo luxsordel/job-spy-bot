@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from html import escape
 from typing import Any
 
-from jobspybot import feedback, notify
+from jobspybot import feedback, market, notify
 from jobspybot.billing import PRO, SUBSCRIPTION_PERIOD_SECONDS, Billing
 from jobspybot.config import Settings
 from jobspybot.db import Application, Database, Resume, User, utcnow
@@ -29,6 +29,7 @@ from jobspybot.limits import (
     parse_int,
     parse_salary,
 )
+from jobspybot.market import Market
 from jobspybot.models import Level, Vacancy
 from jobspybot.profile import (
     PATCH_KEYS,
@@ -113,6 +114,7 @@ COMMANDS = [
     ("plan", "Подписка"),
     ("applications", "Мои отклики"),
     ("stats", "Статистика"),
+    ("market", "Зарплаты на рынке"),
     ("help", "Помощь"),
     ("privacy", "Мои данные и их удаление"),
     ("reset", "Настроить поиск заново"),
@@ -264,6 +266,7 @@ class Bot:
         self._tasks: set[asyncio.Task[None]] = set()
         self._locks: dict[int, tuple[asyncio.Lock, int]] = {}
         self._ai_notified: dict[int, str] = {}
+        self._market: Market | None = None
         #: шаг анимации «думаю…» (подменяется в тестах)
         self.thinking_tick = THINKING_TICK
         self._menu_actions: dict[str, Callable[[User], Awaitable[None]]] = {
@@ -273,6 +276,7 @@ class Bot:
             r.BTN_PLAN: self.show_plan,
             r.BTN_STATS: self.show_stats,
             r.BTN_APPS: self.show_applications,
+            r.BTN_MARKET: self.show_market,
             r.BTN_PROFILE: self.show_profile,
             r.BTN_HELP: self.show_help,
         }
@@ -1276,6 +1280,32 @@ class Bot:
 
     async def cmd_stats(self, user: User, args: str) -> None:
         await self.show_stats(user)
+
+    async def cmd_market(self, user: User, args: str) -> None:
+        await self.show_market(user)
+
+    # --- рынок зарплат -------------------------------------------------------
+
+    def market_snapshot(self) -> Market:
+        """Снимок рынка; пересобирается раз в сутки по запросу."""
+        now = utcnow()
+        if self._market is None or now - self._market.built_at > market.REFRESH:
+            self._market = market.load(self.db.vacancy_rows(market.DAYS), now)
+        return self._market
+
+    async def show_market(self, user: User) -> None:
+        f = user.filters
+        if not f.queries:
+            await self.reply(user, r.MARKET_EMPTY)
+            return
+        home = f.home_country or "BY"
+        places = [home, *(c for c in f.countries if c != home)][: r.MARKET_PLACES]
+        snapshot = self.market_snapshot()
+        blocks = [
+            (query, [(c, snapshot.by_level(query, c, f.levels)) for c in places])
+            for query in f.queries[: r.MARKET_QUERIES]
+        ]
+        await self.reply(user, r.market_text(blocks, snapshot.built_at))
 
     # --- мои данные ------------------------------------------------------------
 

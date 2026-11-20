@@ -7,6 +7,7 @@ from html import escape
 
 from jobspybot.billing import FREE, PRO, Plan
 from jobspybot.filters import COUNTRIES, LEVEL_TITLES, UserFilters
+from jobspybot.market import Range, country_title
 from jobspybot.models import Level, Vacancy
 from jobspybot.profile import RELOCATION_COUNTRIES, WORK_FORMATS, UserProfile
 from jobspybot.sources import REGISTRY
@@ -23,9 +24,10 @@ BTN_STATS = "📊 Статистика"
 BTN_HELP = "❓ Помощь"
 BTN_PROFILE = "👤 Профиль"
 BTN_APPS = "📋 Отклики"
+BTN_MARKET = "📈 Рынок"
 MENU_ROWS = [
     [BTN_SEARCH, BTN_PROFILE],
-    [BTN_RESUMES, BTN_FILTERS],
+    [BTN_RESUMES, BTN_FILTERS, BTN_MARKET],
     [BTN_APPS, BTN_PLAN, BTN_HELP],
 ]
 
@@ -344,6 +346,7 @@ HELP = f"""<b>{BRAND}</b> — ваш помощник в поиске работ
 {BTN_RESUMES} — загрузить PDF, список резюме
 {BTN_FILTERS} — направления, уровень, страны, зарплата…
 {BTN_APPS} — куда откликнулись и на каком этапе
+{BTN_MARKET} — сколько платят по вашим направлениям
 {BTN_PLAN} — тарифы и оплата
 
 <b>Подсказки</b>
@@ -392,4 +395,47 @@ def privacy_text(inactive_days: int, support: str = "") -> str:
     ]
     if support:
         lines += ["", f"Вопросы: {escape(support)}"]
+    return "\n".join(lines)
+
+
+# --- рынок зарплат ---------------------------------------------------------------
+
+#: сколько направлений и стран показывать — чтобы сообщение не превращалось в простыню
+MARKET_QUERIES = 3
+MARKET_PLACES = 3
+MARKET_EMPTY = (
+    "<b>📈 Рынок зарплат</b>\n\nСначала выберите направления поиска — "
+    "покажу вилки по ним. Это делается в ⚙️ Фильтры → 🔍 Направления."
+)
+
+
+def _money(usd: int) -> str:
+    return f"{usd:,}".replace(",", " ")
+
+
+def market_text(
+    blocks: list[tuple[str, list[tuple[str, dict[str, Range]]]]], built_at: datetime
+) -> str:
+    """«python developer → 🇧🇾 Беларусь → junior: 800–1 400 $ · медиана 1 100 $ (23)»."""
+    lines = [
+        "<b>📈 Рынок зарплат</b>",
+        "<i>По вилкам из вакансий за 30 дней, $ в месяц: середина рынка и медиана.</i>",
+    ]
+    for query, places in blocks:
+        lines += ["", f"<b>{escape(query)}</b>"]
+        for country, ranges in places:
+            lines.append(country_title(country))
+            if not ranges:
+                lines.append("   мало вакансий с вилкой")
+            for level, rng in ranges.items():
+                name = "все грейды" if level == "all" else LEVEL_TITLES[Level(level)]
+                lines.append(
+                    f"   {name}: <b>{_money(rng.low)}–{_money(rng.high)} $</b>"
+                    f" · медиана {_money(rng.median)} $ ({rng.count})"
+                )
+    lines += [
+        "",
+        f"<i>Обновлено {built_at:%d.%m %H:%M} UTC. Вилки бывают до и после налогов, "
+        "курсы валют примерные.</i>",
+    ]
     return "\n".join(lines)
