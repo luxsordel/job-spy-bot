@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -314,6 +314,15 @@ class Database:
         v = Vacancy.from_dict(json.loads(row["data"]))
         v.description = row["description"]
         return v
+
+    def vacancy_rows(self, days: int) -> Iterator[str]:
+        """JSON вакансий за `days` дней, по одной на вакансию (дубли площадок схлопнуты)."""
+        since = (utcnow() - timedelta(days=days)).isoformat()
+        rows = self.conn.execute(
+            "SELECT data FROM vacancies WHERE first_seen >= ? GROUP BY fingerprint", (since,)
+        )
+        for row in rows:
+            yield row["data"]
 
     def set_description(self, uid: str, text: str) -> None:
         self.conn.execute("UPDATE vacancies SET description = ? WHERE uid = ?", (text, uid))
