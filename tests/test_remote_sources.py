@@ -1,4 +1,4 @@
-"""Мировая удалёнка: Hirify, Remote.com, Himalayas, Remote OK, We Work Remotely, Working Nomads."""
+"""Мировая удалёнка: Hirify, Himalayas, Remote OK, We Work Remotely, Working Nomads."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from jobspybot.models import Level, Vacancy
 from jobspybot.sources.base import matches_query
 from jobspybot.sources.himalayas import Himalayas
 from jobspybot.sources.hirify import Hirify
-from jobspybot.sources.remotecom import RemoteCom
 from jobspybot.sources.remoteok import RemoteOK
 from jobspybot.sources.weworkremotely import WeWorkRemotely
 from jobspybot.sources.workingnomads import WorkingNomads
@@ -156,39 +155,6 @@ async def test_workingnomads(settings):
     (v,) = await source.search("python")
     assert v.company == "Lemon.io" and v.external_id == "1994915"
     assert v.regions == ("Europe",) and v.country == "REMOTE"
-
-
-async def test_remotecom(settings):
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(200, text=fixture_text("remotecom_search.html"))
-
-    proxify, northbeam, office = await RemoteCom(make_http(handler), settings).search("python")
-    assert seen[0].url.params["query"] == "python"
-    assert proxify.url == (
-        "https://remote.com/jobs/proxify-c114ohln/senior-backend-developer-python-django-j12wcpci"
-    )
-    # суммы в центах, помесячно
-    assert proxify.salary_from == 3000 and proxify.salary_to == 6000 and proxify.currency == "EUR"
-    assert proxify.regions == ("Worldwide",) and proxify.level is Level.SENIOR
-    assert northbeam.salary_from == 11667 and northbeam.level is Level.MIDDLE
-    assert northbeam.regions == ("Canada", "United States") and northbeam.country == "REMOTE"
-    # гибрид в Варшаве — вакансия Польши, без ограничений удалёнки
-    assert office.country == "PL" and office.remote is False and office.regions == ()
-
-    http = make_http(text_handler("remotecom_job.html"))
-    text = await RemoteCom(http, settings).fetch_description(proxify)
-    assert text == "About us:\nTalent has no borders."
-
-
-async def test_remotecom_layout_change_is_reported(settings):
-    from jobspybot.sources import SourceUnavailable
-
-    http = make_http(lambda request: httpx.Response(200, text="<html></html>"))
-    with pytest.raises(SourceUnavailable):
-        await RemoteCom(http, settings).search("python")
 
 
 async def test_hirify(settings):
