@@ -3,9 +3,7 @@
     "github": {
       "type": "http",
       "url": "https://api.githubcopilot.com/mcp/",
-      "headers": {
-        "Authorization": "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}"
-      }
+      "headersHelper": "python -c \"import json,subprocess;print(json.dumps({'Authorization':'Bearer '+subprocess.check_output(['gh','auth','token'],text=True).strip()}))\""
     },
     "context7": {
       "type": "http",
