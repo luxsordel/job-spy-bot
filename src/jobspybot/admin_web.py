@@ -162,6 +162,7 @@ def effective_values(s: Settings) -> dict[str, str]:
         "POLL_INTERVAL_MIN": s.poll_interval_min,
         "MAX_VACANCY_AGE_DAYS": s.max_vacancy_age_days,
         "ENABLED_SOURCES": ",".join(sorted(s.enabled_sources)),
+        "TG_CHANNELS": ",".join(s.tg_channels) or "-",
         "LOG_LEVEL": s.log_level,
         "SUPERJOB_API_KEY": s.superjob_api_key,
         "AI_BASE_URL": ai.base_url,
