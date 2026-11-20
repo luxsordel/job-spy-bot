@@ -164,17 +164,20 @@ class Analysis:
         )
 
     def render(self) -> str:
-        lines = [f"🤖 <b>{self.score}/100</b> — {escape(self.verdict)}"]
-        if self.resume_title:
-            lines.append(f"📄 Подавать: «{escape(self.resume_title)}»")
+        filled = round(self.score / 10)
+        lines = [f"<b>ИИ · {self.score}</b>  {'▰' * filled}{'▱' * (10 - filled)}"]
+        if self.verdict:
+            lines.append(escape(self.verdict))
         if self.pros:
-            lines.append("➕ " + escape("; ".join(self.pros)))
+            lines.append("+ " + escape("; ".join(self.pros)))
         if self.cons:
-            lines.append("➖ " + escape("; ".join(self.cons)))
+            lines.append("− " + escape("; ".join(self.cons)))
+        if self.resume_title:
+            lines.append(f"Резюме: «{escape(self.resume_title)}»")
         if self.by != "ok" or self.by_note:
             icon = {"ok": "🇧🇾", "risk": "⚠️", "no": "⛔"}[self.by]
             lines.append(f"{icon} {escape(self.by_note or 'есть ограничения для граждан РБ')}")
-        return "\n".join(lines)
+        return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
 
 _SALVAGE = {
@@ -372,7 +375,7 @@ class AIService:
     async def build_profile(self, user: User, resume: Resume) -> str:
         """Хук для бота: вызывается после загрузки резюме, возвращает ответ пользователю."""
         if not self.has_budget(user):
-            return "✅ Резюме сохранено, но дневной лимит ИИ исчерпан — профиль соберу завтра."
+            return "Резюме сохранено ✓ Но дневной лимит ИИ исчерпан — профиль соберу завтра."
         try:
             data = parse_json(
                 await self._ask(
@@ -386,7 +389,7 @@ class AIService:
             )
         except LLMError as exc:
             log.warning("profile for %s failed: %s", user.id, exc)
-            return "✅ Резюме сохранено, но ИИ сейчас недоступен. Загрузите его ещё раз позже."
+            return "Резюме сохранено ✓ Но ИИ сейчас недоступен — загрузи его ещё раз чуть позже."
 
         skills = [str(s).lower()[:40] for s in data.get("skills") or [] if s][:20]
         profile = json.dumps(
@@ -408,9 +411,9 @@ class AIService:
         self.db.save_profile(user.id, user_profile)
         summary = escape(str(data.get("summary") or ""))
         return (
-            f"✅ Резюме «{escape(resume.title)}» разобрано:\n\n"
+            f"<b>Резюме «{escape(resume.title)}» разобрано ✓</b>\n\n"
             f"<i>{summary}</i>\n\n"
-            f"🧩 Навыки: {escape(', '.join(skills)) or '—'}"
+            f"Навыки: {escape(', '.join(skills)) or '—'}"
         )
 
     # --- оценка --------------------------------------------------------------

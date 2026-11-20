@@ -142,7 +142,7 @@ async def test_parsed_resume_is_one_message_with_education(bot, tg, db):
     assert "БГЭУ, экономика, не окончено" in card
     assert card.count("sql") == 1
     assert "Потом спрошу" in card and "зарплату" in card
-    assert "\n\n🧩 Навыки" in card  # блоки разделены пустой строкой
+    assert "</blockquote>\n<blockquote>Навыки" in card  # блоки — отдельными карточками
 
 
 async def test_failed_parse_still_explains(bot, tg, db):
@@ -170,7 +170,7 @@ def test_education_in_card():
     p = UserProfile()
     p.merge_extracted({"education": ["БНТУ, ПОИТ, 2024", "  ", "Курсы Python, 2023"]})
     card = r.profile_card(p, [])
-    assert "🎓 Образование" in card and "БНТУ, ПОИТ, 2024" in card and "Курсы Python" in card
+    assert "Образование:" in card and "БНТУ, ПОИТ, 2024" in card and "Курсы Python" in card
 
 
 # --- начать заново -----------------------------------------------------------------
@@ -184,12 +184,12 @@ async def test_start_mid_onboarding_resets(bot, tg, db):
     assert db.get_resumes(GUEST)
     # случайный текст посреди настройки не перезапускает онбординг
     await bot.handle_update(message(GUEST, "что дальше?"))
-    assert "Ответьте на вопрос выше" in shown(tg) and db.get_resumes(GUEST)
+    assert "Ответь на вопрос выше" in shown(tg) and db.get_resumes(GUEST)
     # а /start — начинает с чистого листа
     await bot.handle_update(message(GUEST, "/start"))
     assert any("Начинаем заново" in t for t in tg.texts(GUEST))
     assert db.get_resumes(GUEST) == [] and db.get_profile(GUEST).is_empty
-    assert "Пришлите резюме" in shown(tg)
+    assert "Пришли резюме" in shown(tg)
 
 
 async def test_comeback_after_stopping_bot(bot, tg, db):
@@ -211,7 +211,7 @@ async def test_comeback_after_stopping_bot(bot, tg, db):
     await bot.handle_update(callback(GUEST, "back:reset"))
     user = db.get_user(GUEST)
     assert not user.onboarded and not user.paused and user.filters.queries == []
-    assert db.get_resumes(GUEST) == [] and "Пришлите резюме" in shown(tg)
+    assert db.get_resumes(GUEST) == [] and "Пришли резюме" in shown(tg)
 
 
 async def test_reset_command_keeps_plan(bot, tg, db):

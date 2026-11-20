@@ -80,13 +80,13 @@ def test_db_rows_skip_duplicates_and_old(db):
 async def test_market_screen(bot, tg, db):
     onboarded_user(db, GUEST)
     await bot.handle_update(message(GUEST, r.BTN_MARKET))
-    assert "выберите направления" in tg.texts(GUEST)[-1]
+    assert "выбери направления" in tg.texts(GUEST)[-1]
 
     onboarded_user(db, GUEST, queries=["python developer"], countries=["BY", "REMOTE"])
     db.save_vacancies(vac(i, "Junior Python Developer", 800 + i * 100) for i in range(5))
     await bot.handle_update(message(GUEST, "/market"))
     text = tg.texts(GUEST)[-1]
-    assert "📈 Рынок зарплат" in text and "<b>python developer</b>" in text
+    assert "Рынок зарплат" in text and "<b>python developer</b>" in text
     assert "junior: <b>900–1 100 $</b> · медиана 1 000 $ (5)" in text
     assert "🌍 Удалёнка из любой страны\n   мало вакансий с вилкой" in text
 

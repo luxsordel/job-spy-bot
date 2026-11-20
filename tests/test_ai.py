@@ -103,7 +103,7 @@ def test_parse_json_variants():
 def test_analysis_from_messy_data():
     a = Analysis.from_data({"score": "250", "pros": "не список", "by": "maybe", "cons": [1, ""]})
     assert a.score == 100 and a.pros == [] and a.by == "ok" and a.cons == ["1"]
-    assert "100/100" in Analysis.from_data({"score": 100}).render()
+    assert "ИИ · 100" in Analysis.from_data({"score": 100}).render()
 
 
 def test_compress_drops_boilerplate_keeps_relocation():
@@ -200,7 +200,7 @@ async def test_best_resume_is_chosen_from_shortlist(db):
     assert system.count("»: ") == 3 and "«QA»" in system
     assert analysis.resume_id == ids["QA"]
     assert analysis.resume_title == "QA"
-    assert "Подавать: «QA»" in analysis.render()
+    assert "Резюме: «QA»" in analysis.render()
     best = await ai.best_resume(user, v)
     assert best.file_id == "file-QA"
     assert len(fake.requests) == 1  # best_resume взял выбор из кэша
