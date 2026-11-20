@@ -18,8 +18,10 @@ def test_user_families_include_related_roles():
     assert {"ai", "qa", "python", "dev"} <= VIBE_QA
     assert "analyst" not in VIBE_QA and "sales" not in VIBE_QA
     assert user_families(["бухгалтер"]) == frozenset()  # роль не распознана — не фильтруем
-    # технологии из навыков расширяют круг: питонисту со знанием Go подходит Go
-    assert "go" in user_families(["python developer"], ["golang", "docker"])
+    # стек назван в направлениях — навыки его не расширяют: питонист с Go в резюме ищет Python
+    assert "go" not in user_families(["python developer"], ["golang", "docker"])
+    # направление без стека уточняется навыками
+    assert "go" in user_families(["разработчик"], ["golang", "docker"])
 
 
 @pytest.mark.parametrize(
@@ -148,12 +150,59 @@ MISHA = user_families(
         ("Junior Backend-разработчик (Python, FastAPI)", Fit.MATCH),
         ("AI Engineer (Разработчик ИИ-ботов / ИИ-агентов)", Fit.MATCH),
         ("Стажер-разработчик ИИ-инструментов", Fit.MATCH),
-        ("Junior Frontend разработчик (React)", Fit.MATCH),
         ("Fullstack Python-разработчик (FastAPI/Django + React или Vue)", Fit.MATCH),
+        # React в навыках, но фронтенд он в направлениях не выбирал
+        ("Junior Frontend разработчик (React)", Fit.MISMATCH),
     ],
 )
 def test_misha_real_titles(title, fit):
     assert role_fit(title, MISHA) is fit
+
+
+# --- реальные вакансии владельца (20.11.2026): лимит ИИ ушёл на чужие языки -------
+
+OWNER = user_families(
+    [
+        "python backend developer",
+        "junior python developer",
+        "fastapi developer",
+        "backend developer",
+        "junior python backend developer",
+    ],
+    ["python", "fastapi", "sql", "c++", "qt", "java", "typescript", "react", "docker"],
+)
+
+
+@pytest.mark.parametrize(
+    ("title", "reason"),
+    [
+        ("BackEnd Developer (Java/Kotlin)", "другой язык: Java/Kotlin"),
+        ("PHP backend mid/mid+", "другой язык: PHP"),
+        ("Backend Developer (Node.js, TypeScript)", "другой язык: JavaScript"),
+        ("Fullstack разработчик (Golang) по сопровождению CRM системы", "другой язык: Go"),
+        ("Full-stack .NET Developer (Middle+/Senior)", "другой язык: .NET"),
+        ("Разработчик C++ (Performance / Эффективность)", "другой язык: C++"),
+        ("Java EE Developer", "другой язык: Java/Kotlin"),
+        ("Middle+/Senior React разработчик", "другая роль: frontend"),
+    ],
+)
+def test_owner_foreign_stack_is_cut_before_ai(title, reason):
+    assert role_fit(title, OWNER) is Fit.MISMATCH
+    assert mismatch_reason(title, OWNER) == reason
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Backend Python Developer / Junior",
+        "Programista/ka Python, C++",  # Python есть — решает ИИ
+        "Middle/middle+ fullstack-разработчик (Python / TypeScript)",
+        "Python разработчик (full-stack)",
+        "AI-инженер (LLM, агенты, автоматизация)",
+    ],
+)
+def test_owner_python_titles_still_match(title):
+    assert role_fit(title, OWNER) is Fit.MATCH
 
 
 def test_backend_alone_does_not_pull_every_language():
