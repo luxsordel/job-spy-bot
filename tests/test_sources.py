@@ -75,6 +75,22 @@ async def test_praca_by(settings):
     assert second.level is Level.SENIOR and second.remote is True
 
 
+async def test_praca_by_retries_with_significant_words(settings):
+    queries = []
+
+    def handler(request):
+        query = request.url.params["search[query]"]
+        queries.append(query)
+        html = fixture_text("praca_search.html") if query == "python" else "<ul></ul>"
+        return httpx.Response(200, text=html)
+
+    found = await PracaBy(make_http(handler), settings).search("Python Developer")
+    assert queries == ["Python Developer", "python"] and len(found) == 2
+
+    queries.clear()
+    assert await PracaBy(make_http(handler), settings).search("python") and queries == ["python"]
+
+
 async def test_jobs_ge_uses_logo_alt_for_company(settings):
     http = make_http(html_handler("jobsge_search.html"))
     first, second = await JobsGe(http, settings).search("python")
