@@ -69,6 +69,8 @@ def test_matches_query_ignores_generic_words():
     assert matches_query("c++", "Senior C++ Engineer")
     assert matches_query("node.js", "Backend (Node.js)")
     assert not matches_query("go", "Google Ads manager")
+    assert not matches_query("java", "JavaScript developer")
+    assert matches_query("аналитик", "Ищем аналитиков данных")
 
 
 def test_vacancy_regions_roundtrip():
@@ -209,3 +211,50 @@ async def test_hirify(settings):
 
     http = make_http(lambda request: httpx.Response(200, json={"text": "<p>Задачи</p>"}))
     assert await Hirify(http, settings).fetch_description(ru) == "Задачи"
+
+
+async def test_telegram_channels_parse_posts():
+    from jobspybot.config import Settings
+    from jobspybot.sources.telegram_channels import TelegramChannels
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, text=fixture_text("telegram_channel.html"))
+
+    settings = Settings(tg_channels=("remocate",))
+    source = TelegramChannels(make_http(handler), settings)
+    python, cro = await source.feed()  # реклама и статья отсеяны, свежие — первыми
+    assert seen == ["/s/remocate"]
+
+    assert cro.title == "CRO (Conversion Rate Optimization) Specialist"
+    assert cro.company == "GipsyTeam" and cro.url == "https://t.me/remocate/6841"
+    assert cro.remote is True and cro.work_formats == ("remote",)
+    assert cro.published_at == datetime(2026, 11, 20, 8, 15, tzinfo=UTC)
+    assert "Зарплата в долларах" in cro.description
+
+    # «Новая вакансия» — заголовок, название берётся из следующей строки
+    assert python.title == "Senior Python Developer (FastAPI)"
+    assert python.skills == ("python", "fastapi") and python.work_formats == ("hybrid",)
+
+    assert [v.external_id for v in await source.search("python developer")] == ["remocate/6844"]
+    assert seen == ["/s/remocate"]  # лента кэшируется на цикл
+
+
+def test_tg_channels_setting():
+    from jobspybot.config import DEFAULT_TG_CHANNELS, ConfigError, Settings
+
+    assert Settings.from_env({}).tg_channels == DEFAULT_TG_CHANNELS
+    env = {"TG_CHANNELS": "@GeekJobs, https://t.me/forproducts, geekjobs"}
+    assert Settings.from_env(env).tg_channels == ("geekjobs", "forproducts")
+    assert Settings.from_env({"TG_CHANNELS": "-"}).tg_channels == ()
+    with pytest.raises(ConfigError):
+        Settings.from_env({"TG_CHANNELS": "bad channel!"})
+
+
+def test_telegram_source_off_without_channels():
+    from jobspybot.config import Settings
+    from jobspybot.sources.telegram_channels import TelegramChannels
+
+    assert not TelegramChannels.is_configured(Settings(tg_channels=()))

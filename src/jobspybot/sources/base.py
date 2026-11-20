@@ -77,11 +77,22 @@ def query_words(query: str) -> list[str]:
     return [w for w in words if w not in _GENERIC] or words
 
 
+_CYRILLIC = re.compile(r"[а-я]")
+
+
 def matches_query(query: str, text: str) -> bool:
-    """Все значимые слова запроса есть в тексте (целыми словами)."""
+    """Все значимые слова запроса есть в тексте.
+
+    Латиница — целым словом («java» не находит «javascript»), кириллица — с начала слова,
+    чтобы «аналитик» находил «аналитика» и «аналитиков».
+    """
     words = query_words(query)
     hay = " " + " ".join(_WORD.findall(text.lower().replace("ё", "е"))) + " "
-    return bool(words) and all(f" {w} " in hay for w in words)
+
+    def found(word: str) -> bool:
+        return f" {word}" in hay if _CYRILLIC.search(word) else f" {word} " in hay
+
+    return bool(words) and all(found(w) for w in words)
 
 
 class FeedSource(Source):
@@ -109,12 +120,12 @@ class FeedSource(Source):
         return self._feed
 
     async def search(self, query: str) -> list[Vacancy]:
-        found = [v for v in await self.feed() if matches_query(query, haystack(v))]
+        found = [v for v in await self.feed() if matches_query(query, self.haystack(v))]
         return found[: self.page_size]
 
-
-def haystack(v: Vacancy) -> str:
-    return " ".join((v.title, " ".join(v.skills)))
+    def haystack(self, v: Vacancy) -> str:
+        """Где искать слова запроса: название и теги."""
+        return " ".join((v.title, " ".join(v.skills)))
 
 
 def register(cls: type[Source]) -> type[Source]:
