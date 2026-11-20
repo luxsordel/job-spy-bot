@@ -191,7 +191,17 @@ TECH = frozenset(
     {"python", "js", "java", "dotnet", "php", "go", "cpp", "1c", "frontend", "backend", "mobile"}
 )
 
+#: языки и платформы: если в названии вакансии есть только чужие языки — это другая работа
+LANGS = frozenset({"python", "js", "java", "dotnet", "php", "go", "cpp", "1c"})
+
 FAMILY_TITLES = {
+    "java": "Java/Kotlin",
+    "dotnet": ".NET",
+    "php": "PHP",
+    "go": "Go",
+    "cpp": "C++",
+    "js": "JavaScript",
+    "python": "Python",
     "analyst": "аналитик",
     "pm": "менеджер проектов",
     "design": "дизайн",
@@ -237,8 +247,12 @@ def user_families(queries: Iterable[str], skills: Iterable[str] = ()) -> frozens
         return frozenset()
     for f in list(found):
         found |= RELATED.get(f, frozenset())
-    for skill in skills:
-        found |= families(skill) & TECH
+    if not found & TECH:
+        # направления без языка и стека («разработчик») — уточняем их навыками. Если же стек
+        # в направлениях назван, навыки его не расширяют: C++ и Java в резюме Python-бэкендера
+        # тянули Java-, C++- и фронтенд-вакансии, и на их оценку уходил весь лимит ИИ
+        for skill in skills:
+            found |= families(skill) & TECH
     if {"frontend", "backend"} <= found:
         found.add("fullstack")
     return frozenset(found)
@@ -254,6 +268,8 @@ def role_fit(title: str, wanted: frozenset[str]) -> Fit:
     specific = found - {"dev"}
     if (specific & PROFESSIONS) - wanted:
         return Fit.MISMATCH
+    if foreign_langs(found, wanted):
+        return Fit.MISMATCH  # «Backend (Java/Kotlin)» для того, кто ищет Python-бэкенд
     if specific & wanted:
         return Fit.MATCH
     if not specific:
@@ -262,7 +278,16 @@ def role_fit(title: str, wanted: frozenset[str]) -> Fit:
     return Fit.MISMATCH
 
 
-def mismatch_reason(title: str) -> str:
+def foreign_langs(found: set[str], wanted: frozenset[str]) -> set[str]:
+    """Языки из названия, если среди них нет ни одного нужного (иначе пусто)."""
+    langs, wanted_langs = found & LANGS, wanted & LANGS
+    return langs if langs and wanted_langs and not langs & wanted_langs else set()
+
+
+def mismatch_reason(title: str, wanted: frozenset[str] = frozenset()) -> str:
+    foreign = sorted(foreign_langs(families(title), wanted))
+    if foreign:
+        return "другой язык: " + ", ".join(FAMILY_TITLES.get(f, f) for f in foreign[:2])
     all_found = families(title) - {"dev"}
     found = sorted(all_found & PROFESSIONS) or sorted(all_found)
     names = ", ".join(FAMILY_TITLES.get(f, f) for f in found[:2])

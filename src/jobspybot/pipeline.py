@@ -258,7 +258,7 @@ class Pipeline:
             reason = check(v, f, max_age_days=self.settings.max_vacancy_age_days)
             fit = role_fit(v.title, wanted)
             if reason is None and fit is Fit.MISMATCH:
-                reason = mismatch_reason(v.title)
+                reason = mismatch_reason(v.title, wanted)
             score = max((local_score(v, s) for s in skill_sets), default=local_score(v, []))
             if reason is None and skill_sets and score < f.min_local_score:
                 reason = f"мало совпадений навыков ({score})"
