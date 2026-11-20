@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 640 640">
+ <!-- JobSpy: радар на тёмном фоне. Источник аватарки; JPG — src/jobspybot/assets/avatar.jpg -->
+ <defs>
+  <radialGradient id="bg" cx="0.5" cy="0.45" r="0.8"><stop offset="0" stop-color="#18202B"/><stop offset="1" stop-color="#06080C"/></radialGradient>
+  <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#D9FF3F"/><stop offset="1" stop-color="#2DE6B0"/></linearGradient>
+  <radialGradient id="sweep" cx="320" cy="320" r="230" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#D9FF3F" stop-opacity="0.6"/><stop offset="1" stop-color="#2DE6B0" stop-opacity="0.04"/></radialGradient>
+  <radialGradient id="dot" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#F4FF9A"/><stop offset="0.35" stop-color="#D9FF3F" stop-opacity="0.85"/><stop offset="1" stop-color="#D9FF3F" stop-opacity="0"/></radialGradient>
+ </defs>
+ <rect width="640" height="640" fill="url(#bg)"/>
+ <g stroke="#2DE6B0" stroke-opacity="0.14" stroke-width="3">
+  <line x1="320" y1="90" x2="320" y2="550"/><line x1="90" y1="320" x2="550" y2="320"/>
+ </g>
+ <path d="M320 320 L320 90 A230 230 0 0 1 519 205 Z" fill="url(#sweep)"/>
+ <circle cx="320" cy="320" r="230" fill="none" stroke="url(#ring)" stroke-width="14"/>
+ <circle cx="320" cy="320" r="155" fill="none" stroke="url(#ring)" stroke-width="10" stroke-opacity="0.55"/>
+ <circle cx="320" cy="320" r="80" fill="none" stroke="url(#ring)" stroke-width="8" stroke-opacity="0.35"/>
+ <circle cx="320" cy="320" r="16" fill="#D9FF3F"/>
+ <circle cx="214" cy="418" r="7" fill="#2DE6B0" fill-opacity="0.55"/>
+ <circle cx="438" cy="196" r="60" fill="url(#dot)"/>
+ <circle cx="438" cy="196" r="17" fill="#FFFFFF"/>
+</svg>

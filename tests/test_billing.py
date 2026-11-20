@@ -83,7 +83,7 @@ def test_notices(billing, db):
     u = db.get_user(u.id)
     assert billing.notice(u, u.plan_until - timedelta(hours=12)) is None
     key, text = billing.notice(u, u.plan_until + timedelta(hours=1))
-    assert key.startswith("expired:") and "бесплатном" in text
+    assert key.startswith("expired:") and "бесплатный" in text
     assert billing.notice(user(db, ADMIN), now) is None
 
 

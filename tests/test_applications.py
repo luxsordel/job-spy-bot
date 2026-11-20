@@ -34,7 +34,7 @@ async def test_vacancy_card_has_applied_button(bot, tg, db):
     v, did = delivered(db, ADMIN)
     await bot.send_vacancy(db.get_user(ADMIN), v, did)
     rows = tg.calls[-1][1]["reply_markup"]["inline_keyboard"]
-    assert rows[1] == [{"text": "✅ Откликнулся", "callback_data": f"ap:{did}"}]
+    assert rows[1] == [{"text": "+ В отклики", "callback_data": f"ap:{did}"}]
 
 
 async def test_mark_applied_and_change_status(bot, tg, db):
@@ -42,7 +42,7 @@ async def test_mark_applied_and_change_status(bot, tg, db):
     v, did = delivered(db, ADMIN)
     markup = [
         [{"text": "🔗", "url": v.url}, {"text": "👍", "callback_data": f"like:{did}"}],
-        [{"text": "✅ Откликнулся", "callback_data": f"ap:{did}"}],
+        [{"text": "+ В отклики", "callback_data": f"ap:{did}"}],
     ]
     await bot.handle_update(card_callback(ADMIN, f"ap:{did}", markup))
     await bot.handle_update(card_callback(ADMIN, f"ap:{did}", markup))  # повтор — без дубля
@@ -53,7 +53,7 @@ async def test_mark_applied_and_change_status(bot, tg, db):
     rows = payload["reply_markup"]["inline_keyboard"]
     assert rows == [
         [{"text": "🔗", "url": v.url}],
-        [{"text": "📋 В откликах", "callback_data": f"apc:{apps[0].id}:new"}],
+        [{"text": "В откликах ✓", "callback_data": f"apc:{apps[0].id}:new"}],
     ]
 
     await bot.handle_update(message(ADMIN, r.BTN_APPS))
@@ -64,7 +64,7 @@ async def test_mark_applied_and_change_status(bot, tg, db):
     await bot.handle_update(callback(ADMIN, f"aps:{app_id}:interview"))
     assert db.get_application(ADMIN, app_id).status == "interview"
     edited = [p for m, p in tg.calls if m == "editMessageText"][-1]["text"]
-    assert "🗣 Интервью" in edited
+    assert "🟣 Интервью" in edited
     assert db.application_funnel(ADMIN) == {"interview": 1}
 
     await bot.handle_update(callback(ADMIN, f"aps:{app_id}:hacked"))  # мусор не пишется
@@ -88,7 +88,7 @@ async def test_reminder_after_a_week_once(bot, tg, db):
     await bot.send_application_reminders()
     await bot.send_application_reminders()
     texts = tg.texts(ADMIN)
-    assert len(texts) == 1 and "Неделя прошла" in texts[0]
+    assert len(texts) == 1 and "Неделя после отклика" in texts[0]
     # сменил статус — напоминание снова возможно, но не для «интервью»
     db.set_application_status(ADMIN, app_id, "interview")
     db.conn.execute("UPDATE applications SET updated_at = ? WHERE id = ?", (old, app_id))

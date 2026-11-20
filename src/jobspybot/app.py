@@ -47,25 +47,25 @@ def wire_ai(bot: Bot, ai: AIService) -> None:
             await bot.api.answer_callback(cb["id"], "Вакансия уже удалена из базы")
             return
         if not bot.billing.plan(user).apply_button:
-            await bot.api.answer_callback(cb["id"], "Отклик с письмом — в 💎 Pro")
+            await bot.api.answer_callback(cb["id"], "Отклик с письмом — в Pro")
             await bot.show_plan(user)
             return
         resume = await ai.best_resume(user, vacancy)
         if resume is None:
-            await bot.api.answer_callback(cb["id"], "Сначала пришлите резюме (PDF)")
+            await bot.api.answer_callback(cb["id"], "Сначала пришли резюме (PDF)")
             return
-        await bot.api.answer_callback(cb["id"], f"✍️ Готовлю отклик: «{resume.title}»")
+        await bot.api.answer_callback(cb["id"], f"Готовлю отклик: «{resume.title}»")
         if resume.file_id:
             await bot.api.send_document(
-                user.id, resume.file_id, f"📄 Резюме для «{escape(vacancy.title)}»"
+                user.id, resume.file_id, f"Резюме для «{escape(vacancy.title)}»"
             )
-        async with bot.thinking(user, "✍️ Пишу сопроводительное письмо"):
+        async with bot.thinking(user, "Пишу сопроводительное письмо"):
             letter = await ai.cover_letter(user, vacancy, resume)
         await bot.api.send_message(
-            user.id, f"✉️ {vacancy.title}\n{vacancy.url}\n\n{letter}", parse_mode=None
+            user.id, f"{vacancy.title}\n{vacancy.url}\n\n{letter}", parse_mode=None
         )
 
-    bot.extra_buttons["cl"] = ("📄 Отклик", on_apply)
+    bot.extra_buttons["cl"] = ("Отклик", on_apply)
 
 
 async def plan_notices(bot: Bot, stop: asyncio.Event, every: float = 1800) -> None:

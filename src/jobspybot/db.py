@@ -127,6 +127,12 @@ CREATE TABLE IF NOT EXISTS counters (
     n        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, day, key)
 );
+
+-- служебные значения бота (например, какая аватарка уже установлена)
+CREATE TABLE IF NOT EXISTS meta (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
 """
 
 
@@ -404,6 +410,19 @@ class Database:
             "SELECT * FROM users WHERE allowed = 1 AND paused = 0 AND banned = 0"
         )
         return [User.from_row(r) for r in rows]
+
+    # --- служебные значения ----------------------------------------------------
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
     # --- счётчики и удаление данных -------------------------------------------
 

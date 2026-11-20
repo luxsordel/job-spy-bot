@@ -58,7 +58,7 @@ async def test_like_and_stop_word_hint(db):
         await bot.handle_update(callback(ADMIN, f"nope:{i}"))
     assert not any("стоп-слова" in t for t in tg.texts(ADMIN))
     await bot.handle_update(callback(ADMIN, f"nope:{ids[2]}"))
-    assert "Вы скрыли 3 вакансии со словом «1с»" in tg.texts(ADMIN)[-1]
+    assert "Со словом «1с» скрыто уже 3 вакансии" in tg.texts(ADMIN)[-1]
     assert {"exw:1с"} == {b.get("callback_data") for b in buttons(tg)}
     await bot.handle_update(callback(ADMIN, "exw:1с"))
     assert db.get_user(ADMIN).filters.exclude == ["1с"]

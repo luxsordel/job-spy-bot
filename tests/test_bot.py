@@ -137,7 +137,7 @@ async def test_open_mode_admits_with_trial_and_onboarding(db, tg):
     assert bot.billing.plan(user).name == "pro" and bot.billing.is_trial(user)
     texts = tg.texts(GUEST)
     assert "Pro на 7 дней" in texts[0]
-    assert "Пришлите резюме" in texts[1]
+    assert "Пришли резюме" in texts[1]
     assert any("Новый пользователь" in t for t in tg.texts(ADMIN))
 
 
@@ -146,7 +146,7 @@ async def test_invite_flow_starts_onboarding(bot, tg, db):
     code = tg.texts(ADMIN)[-1].split("start=")[1]
     await bot.handle_update(message(GUEST, f"/start {code}"))
     assert db.get_user(GUEST).allowed
-    assert "Пришлите резюме" in tg.texts(GUEST)[-1]
+    assert "Пришли резюме" in tg.texts(GUEST)[-1]
     await bot.handle_update(message(300, f"/start {code}"))  # ссылка одноразовая
     assert not db.get_user(300).allowed
 
@@ -165,21 +165,21 @@ async def test_manual_onboarding_questionnaire(db, tg):
     await bot.handle_update(callback(GUEST, "ob:manual"))
     assert "Что ищем?" in shown(tg)
     await bot.handle_update(callback(GUEST, "pq:next:directions"))
-    assert tg.calls[-1][1]["text"] == "Выберите хотя бы одно направление"
+    assert tg.calls[-1][1]["text"] == "Выбери хотя бы одно направление"
     await bot.handle_update(callback(GUEST, "pq:dir:py"))
     await bot.handle_update(callback(GUEST, "pq:custom"))
     await bot.handle_update(message(GUEST, "аналитик данных, python developer"))
     await bot.handle_update(callback(GUEST, "pq:next:directions"))
-    assert "уровня" in shown(tg)
+    assert "уровень вакансий" in shown(tg)
     await bot.handle_update(callback(GUEST, "pq:next:level"))
-    assert tg.calls[-1][1]["text"] == "Выберите хотя бы один уровень"
+    assert tg.calls[-1][1]["text"] == "Выбери хотя бы один уровень"
     # несколько грейдов сразу: стажёр и junior, а потом junior снят и добавлен middle
     for lvl in ("intern", "junior", "middle", "junior"):
         await bot.handle_update(callback(GUEST, f"pq:level:{lvl}"))
     assert db.get_user(GUEST).filters.levels == ["intern", "middle"]
     await bot.handle_update(callback(GUEST, "pq:next:level"))
     await bot.handle_update(callback(GUEST, "pq:next:work_formats"))
-    assert tg.calls[-1][1]["text"] == "Выберите хотя бы один формат"
+    assert tg.calls[-1][1]["text"] == "Выбери хотя бы один формат"
     await bot.handle_update(callback(GUEST, "pq:fmt:remote"))
     await bot.handle_update(callback(GUEST, "pq:fmt:office"))
     await bot.handle_update(callback(GUEST, "pq:next:work_formats"))
@@ -236,7 +236,7 @@ async def test_resume_onboarding_asks_only_missing(db, tg):
     assert "Вот что я понял" not in shown(tg) and "Middle" in shown(tg)
     assert not db.get_user(GUEST).onboarded
     await bot.handle_update(callback(GUEST, "ob:next"))
-    assert "Сколько хотите получать" in shown(tg)  # всё остальное есть в резюме
+    assert "Сколько хочешь получать" in shown(tg)  # всё остальное есть в резюме
     await bot.handle_update(callback(GUEST, "pq:sal:0"))
     user = db.get_user(GUEST)
     assert user.onboarded
@@ -308,7 +308,7 @@ async def test_filter_buttons(bot, tg, db):
     assert f.levels == ["middle"] and f.countries == ["PL"] and f.remote_only
     assert f.ai_threshold == 70 and f.min_salary_usd == 1500
     assert f.exclude == ["senior", "1С"] and f.queries == ["golang developer"]
-    assert any(b["text"].startswith("✅") and "Go" in b["text"] for b in buttons(tg))
+    assert any(b["text"].startswith("✓") and "Go" in b["text"] for b in buttons(tg))
 
 
 async def test_sources_toggle(bot, tg, db):
@@ -394,7 +394,7 @@ async def test_admin_commands(bot, tg, db):
     assert "Только для администратора" in tg.texts(GUEST)[-1]
     await bot.handle_update(message(ADMIN, f"/grant {GUEST} 30"))
     assert bot.billing.plan(db.get_user(GUEST)).name == "pro"
-    assert "Pro до" in tg.texts(GUEST)[-1]
+    assert "подключён Pro" in tg.texts(GUEST)[-1]
     await bot.handle_update(message(ADMIN, "/admin"))
     assert "На Pro: 1" in tg.texts(ADMIN)[-1]
     await bot.handle_update(message(ADMIN, "/users"))
@@ -562,7 +562,7 @@ async def test_vacancy_card_shows_format_and_address(bot, tg, db):
     db.record(ADMIN, v, "sent")
     await bot.send_vacancy(db.get_user(ADMIN), v, db.delivery_id(ADMIN, v.uid))
     text = tg.calls[-1][1]["text"]
-    assert "🔀 гибрид" in text and "м. Пушкинская" in text
+    assert "гибрид" in text and "м. Пушкинская" in text
 
 
 # --- фидбек тестировщиков: ввод, грейды, защита, данные ----------------------------
@@ -640,7 +640,7 @@ async def test_rate_limit(db, tg):
     texts = tg.texts(GUEST)
     assert len(texts) == before + 1 and "Слишком много" in texts[-1]
     await bot.handle_update(callback(GUEST, "st:show"))
-    assert tg.calls[-1][1]["text"] == "Слишком часто — подождите минуту"
+    assert tg.calls[-1][1]["text"] == "Слишком часто — подожди минуту"
     # админа лимит не касается
     onboarded_user(db, ADMIN)
     for _ in range(40):
@@ -672,7 +672,7 @@ async def test_ban_and_unban(bot, tg, db):
     assert "нельзя" in tg.texts(ADMIN)[-1]
     await bot.handle_update(message(ADMIN, f"/unban {GUEST}"))
     await bot.handle_update(message(GUEST, r.BTN_SEARCH))
-    assert "Мой поиск" in tg.texts(GUEST)[-1]
+    assert "<b>Поиск</b>" in tg.texts(GUEST)[-1]
 
 
 async def test_privacy_and_delete_my_data(bot, tg, db):
@@ -685,7 +685,7 @@ async def test_privacy_and_delete_my_data(bot, tg, db):
     await bot.handle_update(message(GUEST, "/privacy"))
     assert "ИИ-провайдеру" in tg.texts(GUEST)[-1] and "180 дней" in tg.texts(GUEST)[-1]
     await bot.handle_update(callback(GUEST, "del:ask"))
-    assert "Удалить мои данные?" in shown(tg)
+    assert "Удалить твои данные?" in shown(tg)
     await bot.handle_update(callback(GUEST, "del:no"))
     assert db.get_resumes(GUEST)
     await bot.handle_update(message(GUEST, "/delete_me"))
@@ -694,7 +694,7 @@ async def test_privacy_and_delete_my_data(bot, tg, db):
     assert db.get_resumes(GUEST) == [] and db.get_profile(GUEST).city == ""
     assert user.filters.queries == [] and not user.onboarded
     assert user.trial_used and user.plan_until is not None  # пробный период заново не взять
-    assert any("данные удалены" in p.get("text", "") for _, p in tg.calls)
+    assert any("Данные удалены" in p.get("text", "") for _, p in tg.calls)
     assert any("удалил свои данные" in t for t in tg.texts(ADMIN))
 
 
@@ -719,3 +719,28 @@ def test_describe_update_hides_message_text():
     assert describe_update({"callback_query": {"from": {"id": 7}, "data": "menu"}}) == (
         "7: кнопка menu"
     )
+
+
+async def test_avatar_is_set_once(bot, tg):
+    await bot.setup()
+    await bot.setup()
+    methods = [m for m, _ in tg.calls]
+    assert methods.count("setMyProfilePhoto") == 1
+    assert (
+        "attach://avatar" in next(p for m, p in tg.calls if m == "setMyProfilePhoto")["multipart"]
+    )
+
+
+async def test_old_menu_labels_still_work(bot, tg, db):
+    onboarded_user(db, ADMIN)
+    await bot.handle_update(message(ADMIN, "🔎 Мой поиск"))
+    assert "<b>Поиск</b>" in tg.texts(ADMIN)[-1]
+
+
+async def test_selected_options_are_highlighted(bot, tg, db):
+    onboarded_user(db, ADMIN)
+    await bot.handle_update(callback(ADMIN, "f:lvl:middle"))
+    middle = next(b for b in buttons(tg) if "Middle" in b["text"])
+    junior = next(b for b in buttons(tg) if "Junior" in b["text"])
+    assert middle["text"] == "✓ Middle" and middle["style"] == "primary"
+    assert "style" not in junior

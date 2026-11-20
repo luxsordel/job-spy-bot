@@ -54,7 +54,7 @@ def digest_due(f: UserFilters, now: datetime | None = None) -> bool:
 def describe(f: UserFilters) -> str:
     """Короткое описание режима для кнопки и экрана."""
     mode = f"раз в день в {f.digest_hour}:00" if f.notify_mode == DIGEST else "сразу"
-    quiet = " · 🌙 ночью тихо" if f.quiet_hours else ""
+    quiet = " · ночью тихо" if f.quiet_hours else ""
     return mode + quiet
 
 
@@ -71,7 +71,7 @@ def digest_text(items: list[tuple[Vacancy, int | None]], total: int) -> tuple[st
             for x in (
                 escape(v.company[:60]),
                 escape(v.salary_text() or ""),
-                f"🤖 {score}" if score is not None else "",
+                f"ИИ {score}" if score is not None else "",
             )
             if x
         )
@@ -82,6 +82,6 @@ def digest_text(items: list[tuple[Vacancy, int | None]], total: int) -> tuple[st
             break
         blocks.append(block)
         size += len(block) + 1
-    head = f"<b>📬 Дайджест вакансий — {len(blocks)}"
+    head = f"<b>Дайджест · {len(blocks)}"
     head += f" лучших из {total}</b>" if total > len(blocks) else "</b>"
     return head + "\n\n" + "\n".join(blocks), len(blocks)

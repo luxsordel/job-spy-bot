@@ -7,6 +7,7 @@ aiogram / python-telegram-bot удобнее, но тянут pydantic и дес
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -171,9 +172,41 @@ class TelegramAPI:
 
     # --- профиль бота -------------------------------------------------------
 
-    async def set_profile_texts(self, description: str, short_description: str) -> None:
-        await self.call("setMyDescription", description=description[:512])
-        await self.call("setMyShortDescription", short_description=short_description[:120])
+    async def set_profile_texts(
+        self, description: str, short_description: str, name: str = ""
+    ) -> None:
+        """Имя и описания бота — только если отличаются: у set-методов строгий лимит частоты."""
+        for get, set_, key, value in (
+            ("getMyName", "setMyName", "name", name[:64]),
+            ("getMyDescription", "setMyDescription", "description", description[:512]),
+            (
+                "getMyShortDescription",
+                "setMyShortDescription",
+                "short_description",
+                short_description[:120],
+            ),
+        ):
+            if not value:
+                continue
+            current = await self.call(get)
+            if not isinstance(current, dict) or current.get(key) != value:
+                await self.call(set_, **{key: value})
+
+    async def set_profile_photo(self, jpeg: bytes) -> None:
+        """Аватарка бота (Bot API 9.4): статичное фото JPG, загрузка через multipart."""
+        resp = await self._client.post(
+            f"{self._url}/setMyProfilePhoto",
+            data={"photo": json.dumps({"type": "static", "photo": "attach://avatar"})},
+            files={"avatar": ("avatar.jpg", jpeg, "image/jpeg")},
+            timeout=httpx.Timeout(60.0),
+        )
+        result = resp.json()
+        if not result.get("ok"):
+            raise TelegramError(
+                "setMyProfilePhoto",
+                result.get("error_code", resp.status_code),
+                result.get("description", ""),
+            )
 
     async def get_me(self) -> dict[str, Any]:
         return await self.call("getMe")
@@ -194,10 +227,21 @@ def inline_keyboard(*rows: list[dict[str, str]]) -> dict[str, Any]:
     return {"inline_keyboard": [row for row in rows if row]}
 
 
-def reply_keyboard(*rows: list[str], placeholder: str = "") -> dict[str, Any]:
-    """Постоянная клавиатура под полем ввода (главное меню)."""
+#: цвета кнопок (Bot API 9.4); старые клиенты их игнорируют
+PRIMARY, SUCCESS, DANGER = "primary", "success", "danger"
+
+
+def reply_keyboard(
+    *rows: list[str], placeholder: str = "", styles: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """Постоянная клавиатура под полем ввода (главное меню); `styles` — цвет кнопки по тексту."""
+    styles = styles or {}
+
+    def key(text: str) -> dict[str, str]:
+        return {"text": text, "style": styles[text]} if text in styles else {"text": text}
+
     markup: dict[str, Any] = {
-        "keyboard": [[{"text": t} for t in row] for row in rows],
+        "keyboard": [[key(t) for t in row] for row in rows],
         "resize_keyboard": True,
         "is_persistent": True,
     }
@@ -206,8 +250,13 @@ def reply_keyboard(*rows: list[str], placeholder: str = "") -> dict[str, Any]:
     return markup
 
 
-def button(text: str, *, data: str | None = None, url: str | None = None) -> dict[str, str]:
+def button(
+    text: str, *, data: str | None = None, url: str | None = None, style: str | None = None
+) -> dict[str, str]:
+    """Inline-кнопка; `style` — PRIMARY (синяя), SUCCESS (зелёная) или DANGER (красная)."""
     btn = {"text": text}
+    if style:
+        btn["style"] = style
     if url:
         btn["url"] = url
     else:

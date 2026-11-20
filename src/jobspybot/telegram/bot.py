@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from html import escape
+from pathlib import Path
 from typing import Any
 
 from jobspybot import feedback, market, notify
@@ -50,6 +52,9 @@ from jobspybot.resume_files import (
 from jobspybot.sources import REGISTRY, SOURCE_ORDER
 from jobspybot.telegram import render as r
 from jobspybot.telegram.api import (
+    DANGER,
+    PRIMARY,
+    SUCCESS,
     TelegramAPI,
     TelegramError,
     button,
@@ -100,35 +105,39 @@ def update_sender(update: dict[str, Any]) -> int:
     return 0
 
 
-#: как часто обновлять «🤔 Думаю…», пока ИИ работает (секунды)
+#: как часто обновлять «Думаю…», пока ИИ работает (секунды)
 THINKING_TICK = 4.0
 _THINKING_DOTS = ("", ".", "..", "...")
 
 
 COMMANDS = [
     ("start", "Главное меню"),
-    ("search", "Мой поиск"),
+    ("search", "Что и где я ищу"),
     ("profile", "Профиль"),
     ("filters", "Фильтры"),
-    ("resumes", "Мои резюме"),
-    ("plan", "Подписка"),
-    ("applications", "Мои отклики"),
-    ("stats", "Статистика"),
+    ("resumes", "Резюме"),
+    ("applications", "Отклики"),
     ("market", "Зарплаты на рынке"),
-    ("help", "Помощь"),
-    ("privacy", "Мои данные и их удаление"),
+    ("stats", "Статистика за неделю"),
+    ("plan", "Тариф Pro"),
+    ("help", "Как это работает"),
+    ("privacy", "Мои данные"),
     ("reset", "Настроить поиск заново"),
 ]
 
+BOT_NAME = r.BRAND
 BOT_DESCRIPTION = (
-    "🔎 Ищу вакансии на 15 сайтах и в Telegram-каналах: Беларусь, Россия, Казахстан, "
-    "Грузия, Польша и удалёнка по миру.\n\n"
-    "🤖 ИИ читает каждую вакансию и оценивает шанс на оффер под ваше резюме.\n"
-    "🇧🇾 Предупреждаю, если вакансия недоступна гражданам РБ.\n"
-    "📄 Выбираю лучшее из ваших резюме и пишу сопроводительное письмо.\n\n"
-    "Нажмите «Старт» — настройка займёт минуту."
+    "JobSpy — личный агент по поиску работы.\n\n"
+    "• 15 сайтов и Telegram-каналов: Беларусь, Россия, Казахстан, Грузия, Польша "
+    "и удалёнка по миру\n"
+    "• ИИ читает каждую вакансию и оценивает шанс на оффер под твоё резюме\n"
+    "• Предупреждаю, если вакансия закрыта для граждан РБ\n"
+    "• Готовлю отклик: лучшее резюме и сопроводительное письмо\n\n"
+    "Нажми «Старт» — настройка займёт минуту."
 )
-BOT_SHORT_DESCRIPTION = "Вакансии BY · RU · KZ · GE · PL с ИИ-оценкой под ваше резюме"
+BOT_SHORT_DESCRIPTION = "Вакансии BY · RU · KZ · GE · PL и удалёнка — с ИИ-оценкой под твоё резюме"
+#: аватарка бота; меняется в Telegram, только когда меняется файл
+AVATAR = Path(__file__).resolve().parent.parent / "assets" / "avatar.jpg"
 
 _SPLIT = re.compile(r"[;,\n]+")
 MAX_RESUME_CHARS = 8000
@@ -203,8 +212,8 @@ def ago(days: int) -> str:
     return f"{days} дн. назад"
 
 
-def funnel_line(funnel: dict[str, int], label: str = "📋 Отклики") -> str:
-    """«📋 Отклики: 5 — интервью 1 · оффер 1»; пусто, если откликов нет."""
+def funnel_line(funnel: dict[str, int], label: str = "Отклики") -> str:
+    """«Отклики: 5 — интервью 1 · оффер 1»; пусто, если откликов нет."""
     total = sum(funnel.values())
     if not total:
         return ""
@@ -228,7 +237,17 @@ def without_buttons(msg: dict[str, Any], *prefixes: str) -> dict[str, Any]:
 
 
 def main_menu() -> dict[str, Any]:
-    return reply_keyboard(*r.MENU_ROWS, placeholder="Пришлите PDF резюме или выберите раздел")
+    return reply_keyboard(
+        *r.MENU_ROWS, placeholder=r.MENU_PLACEHOLDER, styles={r.BTN_PLAN: PRIMARY}
+    )
+
+
+def toggle(label: str, data: str, on: bool) -> dict[str, str]:
+    """Кнопка-переключатель: выбранная — с галочкой и синяя."""
+    return button(f"{r.CHECK}{label}" if on else label, data=data, style=PRIMARY if on else None)
+
+
+MENU_HINT = "Меню — под полем ввода."
 
 
 class Bot:
@@ -281,6 +300,8 @@ class Bot:
             r.BTN_PROFILE: self.show_profile,
             r.BTN_HELP: self.show_help,
         }
+        for old, new in r.LEGACY_MENU.items():
+            self._menu_actions[old] = self._menu_actions[new]
 
     # --- жизненный цикл ------------------------------------------------------
 
@@ -289,9 +310,27 @@ class Bot:
         self.username = me.get("username", "")
         await self.api.set_commands(COMMANDS)
         try:
-            await self.api.set_profile_texts(BOT_DESCRIPTION, BOT_SHORT_DESCRIPTION)
+            await self.api.set_profile_texts(BOT_DESCRIPTION, BOT_SHORT_DESCRIPTION, BOT_NAME)
         except TelegramError as exc:  # не критично
             log.warning("cannot set bot description: %s", exc)
+        await self._setup_avatar()
+
+    async def _setup_avatar(self) -> None:
+        """Ставит аватарку из пакета, если её ещё нет или файл поменялся."""
+        try:
+            data = AVATAR.read_bytes()
+        except OSError:
+            return
+        digest = hashlib.sha256(data).hexdigest()[:16]
+        if self.db.get_meta("avatar") == digest:
+            return
+        try:
+            await self.api.set_profile_photo(data)
+        except Exception as exc:  # не критично: старый Bot API, сеть
+            log.warning("cannot set bot avatar: %r", exc)
+            return
+        self.db.set_meta("avatar", digest)
+        log.info("bot avatar updated")
 
     async def run(self, stop: asyncio.Event) -> None:
         offset: int | None = None
@@ -333,7 +372,7 @@ class Bot:
     async def send_vacancy(
         self, user: User, vacancy: Vacancy, delivery_id: int, extra: str = ""
     ) -> None:
-        row = [button("🔗 Открыть", url=vacancy.url)]
+        row = [button("Открыть", url=vacancy.url, style=PRIMARY)]
         row += [
             button(text, data=f"{p}:{delivery_id}") for p, (text, _) in self.extra_buttons.items()
         ]
@@ -342,7 +381,7 @@ class Bot:
         await self.api.send_message(
             user.id,
             r.vacancy_card(vacancy, extra),
-            reply_markup=inline_keyboard(row, [button("✅ Откликнулся", data=f"ap:{delivery_id}")]),
+            reply_markup=inline_keyboard(row, [button("+ В отклики", data=f"ap:{delivery_id}")]),
         )
 
     async def ai_limit_reached(self, user: User) -> None:
@@ -352,13 +391,14 @@ class Bot:
             return
         self._ai_notified[user.id] = today
         text = (
-            "🤖 На сегодня лимит ИИ-оценки исчерпан. Вакансии без оценки я не присылаю — "
-            "они подождут и придут после полуночи (UTC), уже с оценкой."
+            "<b>На сегодня лимит ИИ исчерпан</b>\n"
+            "Вакансии без оценки я не присылаю — они подождут и придут после полуночи (UTC), "
+            "уже с оценкой."
         )
         markup = None
         if self.billing.plan(user) is not PRO:
-            text += "\nВ 💎 Pro лимит ИИ намного больше."
-            markup = inline_keyboard([button("💎 Подробнее о Pro", data="plan:show")])
+            text += "\n\nВ Pro лимит ИИ намного больше."
+            markup = inline_keyboard([button("Подробнее о Pro", data="plan:show", style=PRIMARY)])
         await self.reply(user, text, markup)
 
     async def daily_limit_reached(self, user: User) -> None:
@@ -369,9 +409,9 @@ class Bot:
         self._cap_notified[user.id] = today
         await self.reply(
             user,
-            "📭 На сегодня лимит бесплатного тарифа исчерпан — новые вакансии придут завтра.\n"
-            "В Pro — без ограничений и с проверкой каждые 30 минут.",
-            inline_keyboard([button("💎 Подробнее о Pro", data="plan:show")]),
+            "<b>На сегодня лимит Free исчерпан</b>\n"
+            "Новые вакансии придут завтра. В Pro — без ограничений и с проверкой каждые 30 минут.",
+            inline_keyboard([button("Подробнее о Pro", data="plan:show", style=PRIMARY)]),
         )
 
     async def send_plan_notices(self) -> None:
@@ -384,7 +424,9 @@ class Bot:
             key, text = notice
             try:
                 await self.reply(
-                    user, text, inline_keyboard([button("💎 Подписка", data="plan:show")])
+                    user,
+                    text,
+                    inline_keyboard([button("Тариф Pro", data="plan:show", style=PRIMARY)]),
                 )
             except TelegramError as exc:
                 log.info("notice to %s failed: %s", user.id, exc)
@@ -450,10 +492,10 @@ class Bot:
         if self.limiter.allow(uid):
             return False
         if cb:
-            await self.api.answer_callback(cb["id"], "Слишком часто — подождите минуту")
+            await self.api.answer_callback(cb["id"], "Слишком часто — подожди минуту")
         elif self.limiter.should_warn(uid):
             await self.api.send_message(
-                uid, "⏳ Слишком много сообщений подряд. Подождите минуту — и продолжим."
+                uid, "Слишком много сообщений подряд. Подожди минуту — и продолжим."
             )
         return True
 
@@ -484,7 +526,7 @@ class Bot:
                 raise
 
     @contextlib.asynccontextmanager
-    async def thinking(self, user: User, text: str = "🤔 Думаю") -> AsyncIterator[None]:
+    async def thinking(self, user: User, text: str = "Думаю") -> AsyncIterator[None]:
         """Пока ИИ работает, человек видит «печатает…» и сообщение с секундомером —
         понятно, что бот не завис. Когда ответ готов, сообщение удаляется."""
         started = time.monotonic()
@@ -570,7 +612,7 @@ class Bot:
             # посреди настройки: не перезапускать онбординг каждым случайным сообщением
             await self.reply(
                 user,
-                "Ответьте на вопрос выше кнопками 👆 или пришлите резюме файлом.\n"
+                "Ответь на вопрос выше кнопками или пришли резюме файлом.\n"
                 "Начать настройку заново — /start.",
             )
             return
@@ -587,7 +629,7 @@ class Bot:
                 return
             await self.reply(
                 user,
-                "Не понял 🤔 Выберите раздел в меню ниже или пришлите PDF резюме.",
+                "Не понял. Выбери раздел в меню или пришли резюме PDF.",
                 main_menu(),
             )
             return
@@ -600,21 +642,21 @@ class Bot:
             self.db.set_allowed(user.id, True)
             user.allowed = True
             await self.notify_admins(
-                f"👤 Новый пользователь: {escape(user.username or first_name)} "
+                f"Новый пользователь: {escape(user.username or first_name)} "
                 f"(<code>{user.id}</code>){' по приглашению' if invited else ''}"
             )
             await self.cmd_start(user, "", first_name=first_name)
             return False  # сообщение уже обработано онбордингом
         await self.reply(
-            user, "🔒 Бот сейчас работает по приглашениям. Попросите ссылку у администратора."
+            user, "Бот сейчас работает по приглашениям. Попроси ссылку у администратора."
         )
         if cmd == "start":
             await self.notify_admins(
                 f"Запрос доступа: {escape(user.username)} (<code>{user.id}</code>)",
                 inline_keyboard(
                     [
-                        button("✅ Пустить", data=f"allow:{user.id}"),
-                        button("🚫 Нет", data=f"deny:{user.id}"),
+                        button("Пустить", data=f"allow:{user.id}", style=SUCCESS),
+                        button("Отказать", data=f"deny:{user.id}", style=DANGER),
                     ]
                 ),
             )
@@ -664,22 +706,22 @@ class Bot:
             # вернулся после остановки бота (часто — вместе с удалением переписки)
             await self.reply(
                 user,
-                "👋 С возвращением! Продолжить поиск с прежними настройками "
-                "или настроить всё заново?",
+                "<b>С возвращением!</b>\n"
+                "Продолжить поиск с прежними настройками или настроить всё заново?",
                 inline_keyboard(
-                    [button("▶️ Продолжить", data="back:keep")],
-                    [button("🔄 Начать заново", data="back:reset")],
+                    [button("Продолжить", data="back:keep", style=PRIMARY)],
+                    [button("Начать заново", data="back:reset")],
                 ),
             )
             return
         if user.onboarded:
-            await self.reply(user, "Главное меню 👇", main_menu())
+            await self.reply(user, MENU_HINT, main_menu())
             await self.show_search(user)
             return
         if self._has_setup(user):
             # не закончил настройку и нажал «Старт» — начинаем с чистого листа
             await self.reset_setup(user)
-            await self.reply(user, "🔄 Начинаем заново — прежние ответы и резюме стёрты.")
+            await self.reply(user, "Начинаем заново — прежние ответы и резюме стёрты.")
         elif user.stopped_at:
             self.db.set_stopped(user.id, False)
             self.db.set_paused(user.id, False)
@@ -690,10 +732,10 @@ class Bot:
         self._profile_mode[user.id] = "ob"
         await self.reply(
             user,
-            "<b>📄 Пришлите резюме — PDF или .txt</b>\n\n"
-            "Я сам достану из него навыки, опыт и пожелания, заполню профиль и настрою поиск. "
+            "<b>Пришли резюме — PDF или .txt</b>\n"
+            "Сам достану из него навыки, опыт и пожелания, заполню профиль и настрою поиск. "
             "Спрошу только то, чего в резюме нет.",
-            inline_keyboard([button("✍️ Нет резюме — отвечу на вопросы", data="ob:manual")]),
+            inline_keyboard([button("Нет резюме — отвечу на вопросы", data="ob:manual")]),
         )
 
     async def _finish_onboarding(self, user: User) -> None:
@@ -711,10 +753,10 @@ class Bot:
         )
         await self.reply(
             user,
-            "🎉 <b>Готово! Поиск настроен и запущен.</b>\n\n"
+            "<b>Готово — поиск запущен ✓</b>\n\n"
             f"{summary}\n\n"
             f"Первая подборка придёт в течение {min(plan.check_every_min, 30)} минут. "
-            "Поправить что угодно — 👤 Профиль или ⚙️ Фильтры.",
+            f"Поправить что угодно — в разделах {r.BTN_PROFILE} и {r.BTN_FILTERS}.",
             main_menu(),
         )
 
@@ -728,7 +770,7 @@ class Bot:
         self.db.save_filters(user.id, user.filters)
 
     def _save_filter_edit(self, user: User, *fields: str) -> None:
-        """Ручная правка в ⚙️ Фильтрах: сохраняем и запоминаем, чтобы профиль её не перетёр."""
+        """Ручная правка в Фильтрах: сохраняем и запоминаем, чтобы профиль её не перетёр."""
         profile = self.db.get_profile(user.id)
         if "levels" in fields:
             profile.set_levels(user.filters.levels)
@@ -750,7 +792,7 @@ class Bot:
         self._profile_mode.pop(user.id, None)
         if not user.onboarded:
             if msg:
-                await self.edit(msg, "✅ Профиль заполнен", None)
+                await self.edit(msg, "Профиль заполнен ✓", None)
             await self._finish_onboarding(user)
         else:
             await self.show_profile(user, msg)
@@ -766,13 +808,13 @@ class Bot:
     def _question_markup(self, user: User, key: str) -> dict[str, Any]:
         profile = self.db.get_profile(user.id)
         back = (
-            [button("⬅️ К профилю", data="pe:show")]
+            [button(r.TO_PROFILE, data="pe:show")]
             if self._profile_mode.get(user.id) == "edit"
             else []
         )
         if key == "directions":
             return self._directions_markup(
-                user, ctx="pq", done=button("Готово ➡️", data="pq:next:directions")
+                user, ctx="pq", done=button("Готово →", data="pq:next:directions", style=PRIMARY)
             )
         if key == "level":
             return self._toggle_markup(
@@ -780,7 +822,7 @@ class Bot:
                 "level",
                 r.LEVEL_BUTTONS,
                 profile.target_levels(),
-                nav=[*back, button("Далее ➡️", data="pq:next:level")],
+                nav=[*back, button(r.NEXT, data="pq:next:level", style=PRIMARY)],
             )
         if key == "work_formats":
             return self._toggle_markup(
@@ -788,12 +830,12 @@ class Bot:
                 "fmt",
                 WORK_FORMATS,
                 profile.work_formats,
-                nav=[*back, button("Далее ➡️", data="pq:next:work_formats")],
+                nav=[*back, button(r.NEXT, data="pq:next:work_formats", style=PRIMARY)],
                 per_row=3,
             )
         if key == "relocation":
             return inline_keyboard(
-                [button("✈️ Да, готов", data="pq:reloc:yes"), button("Нет", data="pq:reloc:no")],
+                [button("Да", data="pq:reloc:yes"), button("Нет", data="pq:reloc:no")],
                 back,
             )
         if key == "relocation_countries":
@@ -802,14 +844,14 @@ class Bot:
                 "rc",
                 RELOCATION_COUNTRIES,
                 profile.relocation_countries,
-                nav=[*back, button("Далее ➡️", data="pq:next:relocation_countries")],
+                nav=[*back, button(r.NEXT, data="pq:next:relocation_countries", style=PRIMARY)],
             )
         # salary
         presets = [button(f"от {v}$", data=f"pq:sal:{v}") for v in SALARY_PRESETS]
         return inline_keyboard(
             presets[:3],
             presets[3:],
-            [button("Не важно", data="pq:sal:0"), button("✍️ Своя сумма", data="pq:salc")],
+            [button("Не важно", data="pq:sal:0"), button("Своя сумма", data="pq:salc")],
             back,
         )
 
@@ -826,41 +868,44 @@ class Bot:
         user: User,
         msg: dict[str, Any] | None = None,
         *,
-        title: str = "👤 Профиль",
+        title: str = "Профиль",
         summary: str = "",
     ) -> None:
         profile = self.db.get_profile(user.id)
         missing = profile.missing(user.filters)
         text = r.profile_card(profile, user.filters.queries, title=title, summary=summary)
         if profile.is_empty:
-            text += "\n\n<i>Пришлите резюме PDF — заполню профиль автоматически.</i>"
+            text += "\n\n<i>Пришли резюме PDF — заполню профиль сам.</i>"
         elif not user.onboarded:
             then = ", ".join(QUESTION_NAMES[q] for q in missing)
             text += (
-                "\n\n<i>ИИ мог ошибиться — поправьте кнопками ниже то, что не так, "
-                "и нажмите «Всё верно»." + (f" Потом спрошу {then}." if then else "") + "</i>"
+                "\n\n<i>ИИ мог ошибиться — поправь кнопками то, что не так, "
+                "и нажми «Всё верно»." + (f" Потом спрошу {then}." if then else "") + "</i>"
             )
         rows = [
             [
-                button("🔍 Направления", data="pe:directions"),
-                button("🎓 Уровень", data="pe:level"),
+                button("Направления", data="pe:directions"),
+                button("Уровень", data="pe:level"),
             ],
             [
-                button("🏢 Формат и город", data="pe:fmtcity"),
-                button("✈️ Релокация", data="pe:relocation"),
+                button("Формат и город", data="pe:fmtcity"),
+                button("Релокация", data="pe:relocation"),
             ],
-            [button("💰 Зарплата", data="pe:salary"), button("🧩 Навыки", data="pe:skills")],
-            [button("📝 Пожелания", data="pe:wishes")],
+            [button("Зарплата", data="pe:salary"), button("Навыки", data="pe:skills")],
+            [button("Пожелания", data="pe:wishes")],
         ]
         if self.on_profile_edit:
-            rows.append([button("✍️ Изменить словами", data="pe:nl")])
+            rows.append([button("Изменить словами", data="pe:nl")])
         if not user.onboarded:
             # онбординг: после разбора резюме человек проверяет профиль и идёт дальше
-            rows.insert(0, [button("✅ Всё верно — дальше", data="ob:next")])
+            rows.insert(0, [button("Всё верно — дальше", data="ob:next", style=SUCCESS)])
         elif missing:
-            rows.insert(0, [button(f"✍️ Дозаполнить ({len(missing)})", data="pe:fill_missing")])
+            rows.insert(
+                0,
+                [button(f"Дозаполнить · {len(missing)}", data="pe:fill_missing", style=PRIMARY)],
+            )
         if user.onboarded and self.on_resume and self.db.get_resumes(user.id):
-            rows.append([button("📄 Обновить из резюме", data="pe:fill")])
+            rows.append([button("Обновить из резюме", data="pe:fill")])
         markup = inline_keyboard(*rows)
         if msg:
             await self.edit(msg, text, markup)
@@ -877,29 +922,19 @@ class Bot:
         city = p.city or "не указан"
         rows = [
             [
-                button(f"{'✅ ' if k in p.work_formats else ''}{label}", data=f"pf:fmt:{k}")
+                toggle(label, f"pf:fmt:{k}", k in p.work_formats)
                 for k, label in WORK_FORMATS.items()
             ],
-            [
-                button(
-                    f"{'✅' if p.only_home_city else '▫️'} Офис и гибрид только в г. {city}"[:60],
-                    data="pf:city",
-                )
-            ],
-            [button("🏙 Сменить город", data="pf:setcity")],
-            [
-                button(
-                    f"{'✅' if p.strict_format else '▫️'} Скрывать вакансии без формата",
-                    data="pf:strict",
-                )
-            ],
-            [button("⬅️ К профилю", data="pe:show")],
+            [toggle(f"Офис и гибрид только в г. {city}"[:58], "pf:city", p.only_home_city)],
+            [button("Сменить город", data="pf:setcity")],
+            [toggle("Скрывать вакансии без формата", "pf:strict", p.strict_format)],
+            [button(r.TO_PROFILE, data="pe:show")],
         ]
         text = (
-            "<b>🏢 Формат и город</b>\n\n"
-            "Отметьте подходящие форматы. «Только мой город» убирает офис и гибрид в других "
-            "городах вашей страны — удалёнка и релокация остаются.\n\n"
-            "Район или метро напишите в 📝 Пожеланиях — ИИ сверит их с адресом вакансии."
+            "<b>Формат и город</b>\n"
+            "Отметь подходящие форматы. «Только мой город» убирает офис и гибрид в других "
+            "городах твоей страны — удалёнка и релокация остаются.\n\n"
+            "<i>Район или метро напиши в «Пожеланиях» — ИИ сверит их с адресом вакансии.</i>"
         )
         return text, inline_keyboard(*rows)
 
@@ -932,13 +967,13 @@ class Bot:
             if not p.city:
                 self._awaiting[user.id] = "city_pq"
                 await self.api.answer_callback(cb["id"])
-                await self.reply(user, "🏙 В каком городе вы живёте?")
+                await self.reply(user, "В каком городе ты живёшь?")
                 return
             p.only_home_city = not p.only_home_city
         elif action == "setcity":
             self._awaiting[user.id] = "city_pq"
             await self.api.answer_callback(cb["id"])
-            await self.reply(user, "🏙 Напишите город, например <b>Минск</b>.")
+            await self.reply(user, "Напиши город, например <b>Минск</b>.")
             return
         elif action == "strict":
             p.strict_format = not p.strict_format
@@ -951,20 +986,20 @@ class Bot:
 
     async def _nl_edit(self, user: User, text: str) -> None:
         if not self.on_profile_edit:
-            await self.reply(user, "Не понял 🤔 Выберите раздел в меню ниже.", main_menu())
+            await self.reply(user, "Не понял. Выбери раздел в меню.", main_menu())
             return
         if len(text) > MAX_PHRASE_LEN:
             await self.reply(
                 user,
-                f"Слишком длинно — уложитесь в {MAX_PHRASE_LEN} символов. Резюме присылайте "
+                f"Слишком длинно — уложись в {MAX_PHRASE_LEN} символов. Резюме присылай "
                 "файлом PDF.",
             )
             return
-        async with self.thinking(user, "🤔 Разбираю, что поменять"):
+        async with self.thinking(user, "Разбираю, что поменять"):
             patch = await self.on_profile_edit(user, text)
         if patch is None:
             await self.reply(
-                user, "ИИ сейчас недоступен — поменяйте настройки кнопками в 👤 Профиль."
+                user, "ИИ сейчас недоступен — поменяй настройки кнопками в разделе Профиль."
             )
             return
         patch = {k: v for k, v in patch.items() if k in PATCH_KEYS or k == "unclear"}
@@ -979,18 +1014,21 @@ class Bot:
                 (
                     f"Не совсем понял: {escape(unclear)}\n\n"
                     if unclear
-                    else "Не понял, что поменять 🤔\n\n"
+                    else "Не понял, что поменять.\n\n"
                 )
-                + "Напишите, например: <i>только гибрид в Минске, во Фрунзенском районе, "
-                "от 1000$</i> — или поменяйте кнопками в 👤 Профиль.",
+                + "Напиши, например: <i>только гибрид в Минске, во Фрунзенском районе, "
+                "от 1000$</i> — или поменяй кнопками в разделе Профиль.",
             )
             return
         self._pending_patch[user.id] = patch
         await self.reply(
             user,
-            "<b>Понял так:</b>\n" + "\n".join(f"• {escape(x)}" for x in lines) + "\n\nПрименить?",
+            "<b>Понял так</b>\n" + r.card(*(f"• {escape(x)}" for x in lines)) + "\nПрименить?",
             inline_keyboard(
-                [button("✅ Применить", data="nl:apply"), button("✖️ Отмена", data="nl:cancel")]
+                [
+                    button("Применить", data="nl:apply", style=SUCCESS),
+                    button("Отмена", data="nl:cancel"),
+                ]
             ),
         )
 
@@ -1010,7 +1048,7 @@ class Bot:
         await self.api.answer_callback(cb["id"], "Готово")
         if msg:
             await self.edit(
-                msg, "✅ <b>Применено:</b>\n" + "\n".join(f"• {escape(x)}" for x in lines), None
+                msg, "<b>Применено ✓</b>\n" + r.card(*(f"• {escape(x)}" for x in lines)), None
             )
         await self.show_profile(user)
 
@@ -1025,20 +1063,15 @@ class Bot:
         for i in range(0, len(keys), 2):
             rows.append(
                 [
-                    button(
-                        f"{'✅ ' if r.DIRECTIONS[k][1] in selected else ''}{r.DIRECTIONS[k][0]}",
-                        data=f"{ctx}:dir:{k}",
-                    )
+                    toggle(r.DIRECTIONS[k][0], f"{ctx}:dir:{k}", r.DIRECTIONS[k][1] in selected)
                     for k in keys[i : i + 2]
                 ]
             )
         custom = [q for q in user.filters.queries if q.lower() not in _PRESET_QUERIES]
         for q in custom:
-            rows.append(
-                [button(f"✅ {q[:40]}", data=f"{ctx}:dirx:{user.filters.queries.index(q)}")]
-            )
-        nav = [button("✍️ Свой вариант", data=f"{ctx}:custom")]
-        nav.append(done or button("⬅️ Назад", data="f:menu"))
+            rows.append([toggle(q[:40], f"{ctx}:dirx:{user.filters.queries.index(q)}", True)])
+        nav = [button("Свой вариант", data=f"{ctx}:custom")]
+        nav.append(done or button(r.BACK, data="f:menu"))
         rows.append(nav)
         return inline_keyboard(*rows)
 
@@ -1054,10 +1087,7 @@ class Bot:
     ) -> dict[str, Any]:
         keys = list(options)
         rows = [
-            [
-                button(f"{'✅ ' if k in selected else ''}{options[k]}", data=f"{ctx}:{field}:{k}")
-                for k in keys[i : i + per_row]
-            ]
+            [toggle(options[k], f"{ctx}:{field}:{k}", k in selected) for k in keys[i : i + per_row]]
             for i in range(0, len(keys), per_row)
         ]
         rows.append(nav)
@@ -1074,7 +1104,7 @@ class Bot:
         else:
             limit = self.billing.plan(user).max_queries
             if len(f.queries) >= limit:
-                return f"На Free — {limit} направление. В 💎 Pro — до {PRO.max_queries}."
+                return f"В Free — {limit} направление, в Pro — до {PRO.max_queries}."
             f.queries = [*f.queries, query]
         self.db.save_filters(user.id, f)
         return None
@@ -1092,16 +1122,16 @@ class Bot:
             check_every_min=plan.check_every_min,
         )
         pause = (
-            button("▶️ Возобновить", data="f:unpause")
+            button("Возобновить", data="f:unpause", style=SUCCESS)
             if user.paused
-            else button("⏸ Пауза", data="f:pause")
+            else button("Пауза", data="f:pause")
         )
         await self.reply(
             user,
             text,
             inline_keyboard(
-                [button("⚙️ Изменить", data="f:menu"), pause],
-                [button("📊 Статистика", data="st:show"), button("👤 Профиль", data="pe:show")],
+                [button("Изменить", data="f:menu", style=PRIMARY), pause],
+                [button("Статистика", data="st:show"), button("Профиль", data="pe:show")],
             ),
         )
 
@@ -1109,63 +1139,57 @@ class Bot:
         f = user.filters
         rows = [
             [
-                button(f"🔍 Направления ({len(f.queries)})", data="f:dir"),
-                button("🎓 Уровень", data="f:lvl"),
+                button(f"Направления · {len(f.queries)}", data="f:dir"),
+                button("Уровень", data="f:lvl"),
             ],
             [
-                button("🌍 Страны", data="f:cty"),
-                button("🏢 Формат и город", data="pe:fmtcity"),
+                button("Страны", data="f:cty"),
+                button("Формат и город", data="pe:fmtcity"),
             ],
             [
                 button(
-                    f"💰 Зарплата: {f'от {f.min_salary_usd}$' if f.min_salary_usd else '—'}",
+                    f"Зарплата · {f'от {f.min_salary_usd}$' if f.min_salary_usd else '—'}",
                     data="f:salary",
                 ),
-                button(f"🚫 Стоп-слова ({len(f.exclude)})", data="f:exclude"),
+                button(f"Стоп-слова · {len(f.exclude)}", data="f:exclude"),
             ],
             [
-                button("🔎 Площадки", data="f:src"),
-                button(f"🤖 Порог ИИ: {f.ai_threshold}", data="f:thr"),
+                button("Площадки", data="f:src"),
+                button(f"Порог ИИ · {f.ai_threshold}", data="f:thr"),
             ],
-            [button(f"🔔 Присылать: {notify.describe(f)}", data="nt:show")],
+            [button(f"Присылать: {notify.describe(f)}", data="nt:show")],
         ]
-        return "<b>⚙️ Фильтры</b>\nЧто настроить?", inline_keyboard(*rows)
+        return "<b>Фильтры</b>\nЧто настроить?", inline_keyboard(*rows)
 
     def _notify_view(self, user: User) -> tuple[str, dict[str, Any]]:
         f = user.filters
         offset = notify.utc_offset(f)
         local = notify.local_time(f).strftime("%H:%M")
         text = (
-            "<b>🔔 Когда присылать вакансии</b>\n\n"
-            "⚡ <b>Сразу</b> — как только нашлась.\n"
-            f"📬 <b>Раз в день</b> — {notify.DIGEST_SIZE} лучших за сутки одним сообщением.\n"
-            f"🌙 <b>Тихие часы</b> — с {notify.QUIET_FROM}:00 до {notify.QUIET_TO:02d}:00 "
-            "не беспокою, присылаю утром.\n\n"
-            f"Часовой пояс: UTC{offset:+d} (у вас сейчас {local})."
+            "<b>Когда присылать вакансии</b>\n"
+            + r.card(
+                "<b>Сразу</b> — как только нашлась",
+                f"<b>Раз в день</b> — {notify.DIGEST_SIZE} лучших за сутки одним сообщением",
+                f"<b>Тихие часы</b> — с {notify.QUIET_FROM}:00 до {notify.QUIET_TO:02d}:00 "
+                "не беспокою, присылаю утром",
+            )
+            + f"\nЧасовой пояс: UTC{offset:+d}, у тебя сейчас {local}."
         )
-
-        def mark(on: bool, label: str) -> str:
-            return f"✅ {label}" if on else label
 
         digest = f.notify_mode == notify.DIGEST
         rows = [
             [
-                button(mark(not digest, "⚡ Сразу"), data="nt:mode:instant"),
-                button(mark(digest, "📬 Раз в день"), data="nt:mode:digest"),
+                toggle("Сразу", "nt:mode:instant", not digest),
+                toggle("Раз в день", "nt:mode:digest", digest),
             ]
         ]
         if digest:
             rows.append(
-                [
-                    button(mark(f.digest_hour == h, f"{h}:00"), data=f"nt:hour:{h}")
-                    for h in notify.DIGEST_HOURS
-                ]
+                [toggle(f"{h}:00", f"nt:hour:{h}", f.digest_hour == h) for h in notify.DIGEST_HOURS]
             )
-        rows.append([button(mark(f.quiet_hours, "🌙 Тихие часы ночью"), data="nt:quiet")])
-        rows.append(
-            [button(mark(offset == o, f"UTC{o:+d}"), data=f"nt:tz:{o}") for o in notify.UTC_OFFSETS]
-        )
-        rows.append([button("⬅️ Назад", data="f:menu")])
+        rows.append([toggle("Тихие часы ночью", "nt:quiet", f.quiet_hours)])
+        rows.append([toggle(f"UTC{o:+d}", f"nt:tz:{o}", offset == o) for o in notify.UTC_OFFSETS])
+        rows.append([button(r.BACK, data="f:menu")])
         return text, inline_keyboard(*rows)
 
     async def _cb_notify(self, user: User, cb: dict, value: str, msg: dict) -> None:
@@ -1215,15 +1239,17 @@ class Bot:
         if cfg.payments_enabled and not subscribed and not self._is_admin(user):
             try:
                 link = await self.api.create_invoice_link(
-                    title="Job Spy Pro — 30 дней",
+                    title=f"{r.BRAND} Pro — 30 дней",
                     description="Все направления и резюме, вакансии без лимита, ИИ-оценка, "
                     "отклик с письмом, проверка каждые 30 минут.",
                     payload=f"pro:{user.id}",
                     amount=cfg.pro_price_stars,
                     subscription_period=SUBSCRIPTION_PERIOD_SECONDS,
                 )
-                label = "💎 Продлить Pro" if plan is PRO else "💎 Подключить Pro"
-                rows.append([button(f"{label} — {cfg.pro_price_stars} ⭐/мес", url=link)])
+                label = "Продлить Pro" if plan is PRO else "Подключить Pro"
+                rows.append(
+                    [button(f"{label} · {cfg.pro_price_stars} ⭐/мес", url=link, style=SUCCESS)]
+                )
             except TelegramError as exc:
                 log.warning("invoice link failed: %s", exc)
         if subscribed:
@@ -1242,13 +1268,19 @@ class Bot:
         tokens = self.db.tokens_today(user.id)
         await self.reply(
             user,
-            "<b>📊 Статистика за 7 дней</b>\n\n"
-            "📨 Прислал вакансий: "
-            f"<b>{s.get('sent', 0) + s.get('liked', 0) + s.get('disliked', 0)}</b>\n"
-            f"🧹 Отсеял фильтрами: {s.get('filtered', 0)}\n"
-            f"🤖 Отсеял ИИ как неподходящие: {s.get('ai_rejected', 0)}\n"
-            f"👍 Понравились: {s.get('liked', 0)} · 👎 скрыли: {s.get('disliked', 0)}\n\n"
-            f"<b>Сегодня</b>: {today}" + (f" из {limit}" if limit else "") + " вакансий, "
+            "<b>Статистика за 7 дней</b>\n"
+            + r.card(
+                r.field(
+                    "Прислал вакансий",
+                    str(s.get("sent", 0) + s.get("liked", 0) + s.get("disliked", 0)),
+                ),
+                f"Отсеял фильтрами: {s.get('filtered', 0)}",
+                f"Отсеял ИИ как неподходящие: {s.get('ai_rejected', 0)}",
+                f"👍 {s.get('liked', 0)} · 👎 {s.get('disliked', 0)}",
+            )
+            + f"\n<b>Сегодня</b>: {today}"
+            + (f" из {limit}" if limit else "")
+            + " вакансий, "
             f"ИИ — {tokens * 100 // max(1, self.billing.ai_token_limit(user))}% дневного лимита"
             + funnel_line(self.db.application_funnel(user.id)),
         )
@@ -1259,7 +1291,7 @@ class Bot:
     # --- команды (для тех, кто привык к командам) ----------------------------
 
     async def cmd_menu(self, user: User, args: str) -> None:
-        await self.reply(user, "Главное меню 👇", main_menu())
+        await self.reply(user, MENU_HINT, main_menu())
 
     async def cmd_search(self, user: User, args: str) -> None:
         await self.show_search(user)
@@ -1316,7 +1348,7 @@ class Bot:
             r.privacy_text(
                 self.settings.guard.inactive_days, self.settings.billing.support_contact
             ),
-            inline_keyboard([button("🗑 Удалить мои данные", data="del:ask")]),
+            inline_keyboard([button("Удалить мои данные", data="del:ask", style=DANGER)]),
         )
 
     async def cmd_delete_me(self, user: User, args: str) -> None:
@@ -1324,13 +1356,13 @@ class Bot:
 
     async def _ask_delete(self, user: User, msg: dict[str, Any] | None = None) -> None:
         text = (
-            "<b>🗑 Удалить мои данные?</b>\n\n"
-            "Удалю резюме, профиль, фильтры и историю вакансий. Восстановить их будет нельзя. "
+            "<b>Удалить твои данные?</b>\n"
+            "Удалю резюме, профиль, фильтры и историю вакансий — восстановить их будет нельзя. "
             "Подписка Pro, если есть, сохранится до конца оплаченного срока, автопродление "
             "отключу."
         )
         markup = inline_keyboard(
-            [button("🗑 Да, удалить", data="del:yes"), button("Отмена", data="del:no")]
+            [button("Да, удалить", data="del:yes", style=DANGER), button("Отмена", data="del:no")]
         )
         if msg:
             await self.edit(msg, text, markup)
@@ -1362,12 +1394,12 @@ class Bot:
             return
         await self.delete_user_data(user)
         await self.api.answer_callback(cb["id"], "Удалено")
-        text = "✅ Ваши данные удалены. Чтобы начать заново — /start."
+        text = "Данные удалены. Начать заново — /start."
         if msg:
             await self.edit(msg, text, None)
         else:
             await self.reply(user, text)
-        await self.notify_admins(f"🗑 Пользователь <code>{user.id}</code> удалил свои данные")
+        await self.notify_admins(f"Пользователь <code>{user.id}</code> удалил свои данные")
 
     async def _update_list(self, user: User, args: str, attr: str, title: str) -> None:
         f = user.filters
@@ -1378,8 +1410,8 @@ class Bot:
                 if len(values) > limit:
                     await self.reply(
                         user,
-                        f"На вашем тарифе — до {limit} направлений, сохранил первые {limit}. "
-                        f"В 💎 Pro — до {PRO.max_queries}.",
+                        f"На твоём тарифе — до {limit} направлений, сохранил первые {limit}. "
+                        f"В Pro — до {PRO.max_queries}.",
                     )
                     values = values[:limit]
             setattr(f, attr, values)
@@ -1388,16 +1420,16 @@ class Bot:
         await self.reply(user, f"{title}: {escape(', '.join(values)) if values else '—'}")
 
     async def cmd_query(self, user: User, args: str) -> None:
-        await self._update_list(user, args, "queries", "🔍 Направления")
+        await self._update_list(user, args, "queries", "Направления")
 
     async def cmd_include(self, user: User, args: str) -> None:
-        await self._update_list(user, args, "include", "✅ Слова в названии")
+        await self._update_list(user, args, "include", "Слова в названии")
 
     async def cmd_exclude(self, user: User, args: str) -> None:
-        await self._update_list(user, args, "exclude", "🚫 Стоп-слова")
+        await self._update_list(user, args, "exclude", "Стоп-слова")
 
     async def cmd_skills(self, user: User, args: str) -> None:
-        await self._update_list(user, args, "skills", "🧩 Навыки")
+        await self._update_list(user, args, "skills", "Навыки")
 
     async def cmd_level(self, user: User, args: str) -> None:
         if args:
@@ -1412,7 +1444,7 @@ class Bot:
                 return
             user.filters.levels = [t for t in dict.fromkeys(tokens) if t]
             self._save_filter_edit(user, "levels")
-        await self.reply(user, f"🎓 Уровень: {', '.join(user.filters.levels) or 'любой'}")
+        await self.reply(user, f"Уровень: {', '.join(user.filters.levels) or 'любой'}")
 
     async def cmd_country(self, user: User, args: str) -> None:
         if args:
@@ -1426,12 +1458,12 @@ class Bot:
             user.filters.countries = [t for t in dict.fromkeys(tokens) if t]
             self._save_filter_edit(user, "countries")
         shown = ", ".join(COUNTRIES[c] for c in user.filters.countries) or "любые"
-        await self.reply(user, f"🌍 Страны: {shown}")
+        await self.reply(user, f"Страны: {shown}")
 
     async def cmd_remote(self, user: User, args: str) -> None:
         user.filters.remote_only = not user.filters.remote_only
         self._save_filter_edit(user, "remote_only")
-        await self.reply(user, f"🏠 Только удалёнка: {'да' if user.filters.remote_only else 'нет'}")
+        await self.reply(user, f"Только удалёнка: {'да' if user.filters.remote_only else 'нет'}")
 
     async def cmd_salary(self, user: User, args: str) -> None:
         if args:
@@ -1452,7 +1484,7 @@ class Bot:
         text = f"от {f.min_salary_usd}$" if f.min_salary_usd else "не важна"
         if f.min_salary_usd and f.require_salary:
             text += ", без указанной зарплаты — скрывать"
-        await self.reply(user, f"💰 Зарплата: {text}")
+        await self.reply(user, f"Зарплата: {text}")
 
     async def cmd_threshold(self, user: User, args: str) -> None:
         if args:
@@ -1462,31 +1494,31 @@ class Bot:
                 return
             user.filters.ai_threshold = value
             self.db.save_filters(user.id, user.filters)
-        await self.reply(user, f"🤖 Порог ИИ: {user.filters.ai_threshold}/100")
+        await self.reply(user, f"Порог ИИ: {user.filters.ai_threshold}/100")
 
     async def cmd_sources(self, user: User, args: str) -> None:
         await self.reply(user, self._sources_text(), self._sources_markup(user.filters))
 
     async def cmd_pause(self, user: User, args: str) -> None:
         self.db.set_paused(user.id, True)
-        await self.reply(user, "⏸ Поиск на паузе. Возобновить — в разделе 🔎 Мой поиск.")
+        await self.reply(user, "Поиск на паузе. Возобновить — в разделе Поиск.")
 
     async def cmd_unpause(self, user: User, args: str) -> None:
         self.db.set_paused(user.id, False)
-        await self.reply(user, "▶️ Поиск возобновлён.")
+        await self.reply(user, "Поиск возобновлён ✓")
 
     # --- площадки ------------------------------------------------------------
 
     def _sources_text(self) -> str:
         missing = [REGISTRY[s].title for s in SOURCE_ORDER if s not in self.available_sources]
         note = f"\n<i>Скоро: {escape(', '.join(missing))}</i>" if missing else ""
-        return "<b>🔎 Площадки</b>\nНажмите, чтобы включить или выключить." + note
+        return "<b>Площадки</b>\nНажми, чтобы включить или выключить." + note
 
     def _sources_markup(self, f: UserFilters) -> dict[str, Any]:
         enabled = set(f.sources or self.available_sources)
         options = {name: REGISTRY[name].title for name in self.available_sources}
         return self._toggle_markup(
-            "f", "src", options, list(enabled), nav=[button("⬅️ Назад", data="f:menu")]
+            "f", "src", options, list(enabled), nav=[button(r.BACK, data="f:menu")]
         )
 
     # --- резюме --------------------------------------------------------------
@@ -1499,7 +1531,7 @@ class Bot:
             await self._save_resume(user, args, title=f"Резюме {self._resume_count(user) + 1}")
             return
         self._awaiting[user.id] = "resume"
-        await self.reply(user, "📄 Пришлите резюме файлом (PDF / .txt) или текстом.")
+        await self.reply(user, "Пришли резюме файлом (PDF или .txt) или текстом.")
 
     async def cmd_resumes(self, user: User, args: str) -> None:
         await self.show_resumes(user)
@@ -1513,21 +1545,24 @@ class Bot:
         limit = self.billing.plan(user).max_resumes
         if not resumes:
             return (
-                "<b>📄 Резюме</b>\n\nПока пусто. Просто пришлите PDF в этот чат — "
+                "<b>Резюме</b>\n\nПока пусто. Просто пришли PDF в этот чат — "
                 "ИИ разберёт его и будет сравнивать с каждой вакансией.",
                 None,
             )
         lines = [
-            f"<b>📄 Резюме</b> ({len(resumes)} из {limit})",
+            f"<b>Резюме</b> · {len(resumes)} из {limit}",
             "Под каждую вакансию выбираю то, с которым больше шансов на оффер.",
             "",
         ]
         for res in resumes:
-            skills = ", ".join(res.skills[:8]) or "⏳ профиль не готов"
-            icon = "📎" if res.file_id else "📝"
-            lines.append(f"{icon} <b>{escape(res.title)}</b>\n    {escape(skills)}")
-        lines += ["", "Добавить — пришлите ещё один PDF."]
-        rows = [[button(f"🗑 {res.title[:30]}", data=f"rdel:{res.id}")] for res in resumes]
+            skills = ", ".join(res.skills[:8]) or "профиль ещё не готов"
+            kind = "файл" if res.file_id else "текст"
+            lines.append(r.card(f"<b>{escape(res.title)}</b> · {kind}", escape(skills)))
+        lines.append("Добавить — пришли ещё один PDF.")
+        rows = [
+            [button(f"Удалить «{res.title[:28]}»", data=f"rdel:{res.id}", style=DANGER)]
+            for res in resumes
+        ]
         return "\n".join(lines), inline_keyboard(*rows)
 
     async def _receive_document(self, user: User, doc: dict[str, Any]) -> None:
@@ -1537,7 +1572,7 @@ class Bot:
             return
         limit = self.settings.guard.max_uploads_per_day
         if not self._is_admin(user) and self.db.count_today(user.id, "upload") >= limit:
-            await self.reply(user, f"На сегодня лимит — {limit} файлов. Попробуйте завтра.")
+            await self.reply(user, f"На сегодня лимит — {limit} файлов. Попробуй завтра.")
             return
         self.db.bump(user.id, "upload")
         try:
@@ -1566,7 +1601,7 @@ class Bot:
                 self._awaiting[user.id] = "resume"
             await self.reply(
                 user,
-                "Это не похоже на резюме 🤔 Пришлите PDF или текст с опытом и навыками.",
+                "Это не похоже на резюме. Пришли PDF или текст с опытом и навыками.",
             )
             return
         summary = ""
@@ -1578,8 +1613,10 @@ class Bot:
         else:
             limit = self.billing.plan(user).max_resumes
             if self._resume_count(user) >= limit:
-                extra = f" В 💎 Pro — до {PRO.max_resumes}." if limit < PRO.max_resumes else ""
-                await self.reply(user, f"Уже {limit} резюме — удалите лишнее в 📄 Резюме.{extra}")
+                extra = f" В Pro — до {PRO.max_resumes}." if limit < PRO.max_resumes else ""
+                await self.reply(
+                    user, f"Уже {limit} резюме — удали лишнее в разделе Резюме.{extra}"
+                )
                 return
             resume_id = self.db.add_resume(
                 user.id, title, text, file_id=file_id, file_name=file_name
@@ -1589,25 +1626,25 @@ class Bot:
             if self.on_resume:
                 summary = await self._read_resume(user, resume)
             else:
-                await self.reply(user, f"✅ Резюме «{escape(title)}» сохранено.")
+                await self.reply(user, f"Резюме «{escape(title)}» сохранено ✓")
         understood = self.on_resume and not self.db.get_profile(user.id).is_empty
         if not user.onboarded:
             self._profile_mode[user.id] = "ob"
             if understood:
                 # сначала человек проверяет и правит то, что понял ИИ, потом — вопросы
                 self._apply_profile(user)
-                await self.show_profile(user, title="👤 Вот что я понял из резюме", summary=summary)
+                await self.show_profile(user, title="Вот что я понял из резюме", summary=summary)
             else:
                 await self._ask_next(user)
         elif understood:
             self._apply_profile(user)
-            await self.show_profile(user, title="👤 Профиль дополнен из резюме", summary=summary)
+            await self.show_profile(user, title="Профиль дополнен из резюме", summary=summary)
 
     async def _read_resume(self, user: User, resume: Resume) -> str:
         """Разбор резюме ИИ. Удалось — краткое содержание для карточки профиля (её
         покажет вызывающий, одним сообщением); нет — ответ ИИ-модуля уходит как есть."""
         assert self.on_resume is not None
-        async with self.thinking(user, f"⏳ Читаю «{escape(resume.title)}»"):
+        async with self.thinking(user, f"Читаю «{escape(resume.title)}»"):
             answer = await self.on_resume(user, resume)
         parsed = self.db.get_resume(user.id, resume.id)
         if parsed is None or not parsed.profile:
@@ -1626,7 +1663,7 @@ class Bot:
             salary, problem = None, str(exc)
         if problem:
             self._awaiting[user.id] = field
-            await self.reply(user, f"{problem} Попробуйте ещё раз.")
+            await self.reply(user, f"{problem} Попробуй ещё раз.")
         return salary
 
     async def _receive_input(self, user: User, field: str, text: str) -> None:
@@ -1639,7 +1676,7 @@ class Bot:
             city = clean_text(text, MAX_CITY_LEN)
             if not city:
                 self._awaiting[user.id] = field
-                await self.reply(user, "Напишите название города, например <b>Минск</b>.")
+                await self.reply(user, "Напиши название города, например <b>Минск</b>.")
                 return
             profile.city = city
             profile.only_home_city = True
@@ -1689,14 +1726,16 @@ class Bot:
             ]
             if errors:
                 await self.reply(
-                    user, errors[0], inline_keyboard([button("💎 Pro", data="plan:show")])
+                    user,
+                    errors[0],
+                    inline_keyboard([button("Подробнее о Pro", data="plan:show", style=PRIMARY)]),
                 )
-            await self.reply(user, "🔍 Направления", self._directions_markup(user, ctx="f"))
+            await self.reply(user, "<b>Направления</b>", self._directions_markup(user, ctx="f"))
             return
         if field == "exclude":
             f.exclude = [] if text.strip() == "-" else parse_list(text)
             self.db.save_filters(user.id, f)
-            await self.reply(user, f"🚫 Стоп-слова: {escape(', '.join(f.exclude)) or '—'}")
+            await self.reply(user, f"Стоп-слова: {escape(', '.join(f.exclude)) or '—'}")
         elif field == "salary":
             salary = await self._ask_salary(user, field, text)
             if salary is None:
@@ -1705,7 +1744,7 @@ class Bot:
             self._save_filter_edit(user, "min_salary_usd")
             await self.reply(
                 user,
-                f"💰 Зарплата: {f'от {f.min_salary_usd}$' if f.min_salary_usd else 'не важна'}",
+                f"Зарплата: {f'от {f.min_salary_usd}$' if f.min_salary_usd else 'не важна'}",
             )
         text_menu, markup = self._filters_menu(user)
         await self.reply(user, text_menu, markup)
@@ -1721,21 +1760,21 @@ class Bot:
             and cfg.payments_enabled
         )
         await self.api.answer_pre_checkout(
-            query["id"], ok, None if ok else "Цена изменилась — откройте 💎 Подписка ещё раз."
+            query["id"], ok, None if ok else "Цена изменилась — открой раздел Pro ещё раз."
         )
 
     async def _on_successful_payment(self, user: User, payment: dict[str, Any]) -> None:
         recurring_renewal = payment.get("is_recurring") and not payment.get("is_first_recurring")
         until = self.billing.on_payment(user, payment)
         if recurring_renewal:
-            await self.reply(user, f"💎 Pro продлён до {r.date_ru(until)}. Спасибо, что с нами!")
+            await self.reply(user, f"Pro продлён до {r.date_ru(until)}. Спасибо, что ты с нами!")
         else:
             await self.reply(
                 user,
-                f"🎉 <b>Pro подключён до {r.date_ru(until)}!</b>\n\n"
+                f"<b>Pro подключён ✓</b>\nАктивен до {r.date_ru(until)}.\n\n"
                 "Все направления и резюме, вакансии без лимита, ИИ-оценка, отклик с письмом "
-                "и проверка каждые 30 минут. Подписка продлевается автоматически, отменить — "
-                "в 💎 Подписка.",
+                "и проверка каждые 30 минут. Подписка продлевается сама, отменить — "
+                "в разделе Pro.",
                 main_menu(),
             )
         await self.notify_admins(
@@ -1831,7 +1870,7 @@ class Bot:
         try:
             await self.api.send_message(
                 target.id,
-                f"🎁 Вам подключён 💎 Pro до {r.date_ru(until)}!",
+                f"<b>Тебе подключён Pro ✓</b>\nАктивен до {r.date_ru(until)}.",
                 reply_markup=main_menu(),
             )
         except TelegramError as exc:
@@ -1880,7 +1919,7 @@ class Bot:
                 await self.api.edit_reply_markup(msg["chat"]["id"], msg["message_id"], None)
             if prefix == "allow" and target:
                 await self.api.send_message(
-                    target.id, "✅ Доступ открыт! Нажмите /start, чтобы настроить поиск."
+                    target.id, "<b>Доступ открыт ✓</b>\nНажми /start, чтобы настроить поиск."
                 )
             return
 
@@ -1934,15 +1973,15 @@ class Bot:
     async def _cb_like(self, user: User, cb: dict, value: str, msg: dict) -> None:
         if value.isascii() and value.isdigit():
             self.db.set_status(user.id, int(value), "liked")
-        await self.api.answer_callback(cb["id"], "👍 Запомнил — буду искать похожие")
+        await self.api.answer_callback(cb["id"], "Запомнил — буду искать похожие")
         if msg:
-            # 🔗, «Отклик» и «Откликнулся» остаются, реакции убираем
+            # «Открыть», «Отклик» и «В отклики» остаются, реакции убираем
             await self.api.edit_reply_markup(
                 msg["chat"]["id"], msg["message_id"], without_buttons(msg, "like:", "nope:")
             )
 
     async def _suggest_stop_word(self, user: User) -> None:
-        """«Вы скрыли 3 вакансии с „1С“ — добавить в стоп-слова?» — по одному разу на слово."""
+        """«Скрыто 3 вакансии с „1С“ — добавить в стоп-слова?» — по одному разу на слово."""
         hinted = [k.removeprefix("hint:") for k in self.db.keys_like(user.id, "hint:")]
         hint = feedback.dislike_hint(
             self.db.reaction_titles(user.id, "disliked"),
@@ -1957,9 +1996,9 @@ class Bot:
         self.db.bump(user.id, f"hint:{word}")
         await self.reply(
             user,
-            f"💡 Вы скрыли {feedback.vacancies_word(count)} со словом «{escape(word)}». "
+            f"Со словом «{escape(word)}» скрыто уже {feedback.vacancies_word(count)}. "
             "Добавить его в стоп-слова, чтобы такие больше не приходили?",
-            inline_keyboard([button(f"🚫 Добавить «{word}»", data=f"exw:{word}")]),
+            inline_keyboard([button(f"Добавить «{word}»", data=f"exw:{word}", style=PRIMARY)]),
         )
 
     async def _cb_exclude_word(self, user: User, cb: dict, value: str, msg: dict) -> None:
@@ -1972,7 +2011,7 @@ class Bot:
         if msg:
             await self.edit(
                 msg,
-                f"🚫 «{escape(word)}» в стоп-словах. Убрать — ⚙️ Фильтры → Стоп-слова.",
+                f"«{escape(word)}» в стоп-словах ✓ Убрать — {r.BTN_FILTERS} → Стоп-слова.",
                 None,
             )
 
@@ -1991,7 +2030,7 @@ class Bot:
             text, markup = r.APPS_EMPTY, None
         else:
             funnel = funnel_line(self.db.application_funnel(user.id), "Всего")
-            lines = [f"<b>📋 Мои отклики</b>{funnel}\n"]
+            lines = [f"<b>Отклики</b>{funnel}\n"]
             buttons = []
             for i, a in enumerate(apps[:MAX_APPS_SHOWN], 1):
                 icon = r.APP_STATUS.get(a.status, ("•", ""))[0]
@@ -2000,7 +2039,7 @@ class Bot:
                 buttons.append(button(str(i), data=f"apc:{a.id}"))
             if len(apps) > MAX_APPS_SHOWN:
                 lines.append(f"…и ещё {len(apps) - MAX_APPS_SHOWN}")
-            lines.append("\nНажмите номер, чтобы сменить статус.")
+            lines.append("\n<i>Нажми номер, чтобы сменить статус.</i>")
             text = "\n".join(lines)
             markup = inline_keyboard(*(buttons[i : i + 5] for i in range(0, len(buttons), 5)))
         if msg:
@@ -2023,14 +2062,17 @@ class Bot:
         ]
         rows = [others[i : i + 2] for i in range(0, len(others), 2)]
         if a.status == "applied" and self.on_followup:
-            rows.append([button("✍️ Написать рекрутеру", data=f"apf:{a.id}")])
+            rows.append([button("Написать рекрутеру", data=f"apf:{a.id}", style=PRIMARY)])
         rows.append(
-            [button("🗑 Удалить", data=f"aps:{a.id}:del"), button("⬅️ К списку", data="apl:")]
+            [
+                button("Удалить", data=f"aps:{a.id}:del", style=DANGER),
+                button("← К списку", data="apl:"),
+            ]
         )
         return text, inline_keyboard(*rows)
 
     async def _cb_applied(self, user: User, cb: dict, value: str, msg: dict) -> None:
-        """«✅ Откликнулся» под вакансией — записать в трекер."""
+        """«В отклики» под вакансией — записать в трекер."""
         vacancy = (
             self.db.delivery_vacancy(user.id, int(value))
             if value.isascii() and value.isdigit()
@@ -2042,10 +2084,10 @@ class Bot:
         app_id = self.db.add_application(user.id, vacancy)
         # откликнулся — значит, подошла: учтём при подборе, как 👍
         self.db.set_status(user.id, int(value), "liked")
-        await self.api.answer_callback(cb["id"], "✅ Записал в 📋 Отклики — напомню через неделю")
+        await self.api.answer_callback(cb["id"], "Записал в отклики — напомню через неделю")
         if msg:
             markup = without_buttons(msg, "ap:", "like:", "nope:")
-            markup["inline_keyboard"].append([button("📋 В откликах", data=f"apc:{app_id}:new")])
+            markup["inline_keyboard"].append([button("В откликах ✓", data=f"apc:{app_id}:new")])
             await self.api.edit_reply_markup(msg["chat"]["id"], msg["message_id"], markup)
 
     async def _cb_app_card(self, user: User, cb: dict, value: str, msg: dict) -> None:
@@ -2078,7 +2120,7 @@ class Bot:
             await self.api.answer_callback(cb["id"])
             return
         icon, label = r.APP_STATUS[status]
-        cheer = " Поздравляю! 🥳" if status == "offer" else ""
+        cheer = " Поздравляю!" if status == "offer" else ""
         await self.api.answer_callback(cb["id"], f"{icon} {label}{cheer}")
         a = self.db.get_application(user.id, app_id)
         assert a is not None
@@ -2100,15 +2142,15 @@ class Bot:
             await self.api.answer_callback(cb["id"])
             return
         if not self.billing.plan(user).apply_button:
-            await self.api.answer_callback(cb["id"], "Письма от ИИ — в 💎 Pro")
+            await self.api.answer_callback(cb["id"], "Письма от ИИ — в Pro")
             await self.show_plan(user)
             return
         await self.api.answer_callback(cb["id"])
-        async with self.thinking(user, "✍️ Пишу сообщение рекрутеру"):
+        async with self.thinking(user, "Пишу сообщение рекрутеру"):
             draft = await self.on_followup(user, a)
         await self.api.send_message(
             user.id,
-            f"✉️ Черновик для «{a.title}» — скопируйте и отправьте рекрутеру:\n\n{draft}",
+            f"Черновик для «{a.title}» — скопируй и отправь рекрутеру:\n\n{draft}",
             parse_mode=None,
         )
 
@@ -2127,24 +2169,24 @@ class Bot:
                 a = apps[0]
                 company = f" ({escape(a.company)})" if a.company else ""
                 text = (
-                    f"⏰ Неделя прошла после отклика на «{escape(a.title)}»{company}. "
+                    f"<b>Неделя после отклика</b>\n«{escape(a.title)}»{company}\n\n"
                     "Есть новости? Если тишина — можно вежливо напомнить о себе рекрутеру."
                 )
                 rows = [
                     [
-                        button("🗣 Позвали", data=f"aps:{a.id}:interview"),
-                        button("📝 Тестовое", data=f"aps:{a.id}:test"),
-                        button("❌ Отказ", data=f"aps:{a.id}:rejected"),
+                        button("Позвали", data=f"aps:{a.id}:interview"),
+                        button("Тестовое", data=f"aps:{a.id}:test"),
+                        button("Отказ", data=f"aps:{a.id}:rejected"),
                     ]
                 ]
                 if self.on_followup:
-                    rows.append([button("✍️ Написать рекрутеру", data=f"apf:{a.id}")])
+                    rows.append([button("Написать рекрутеру", data=f"apf:{a.id}", style=PRIMARY)])
             else:
                 text = (
-                    f"⏰ По {len(apps)} откликам неделю нет движения. Отметьте, что изменилось, "
-                    "а где тишина — можно напомнить о себе рекрутеру."
+                    f"<b>Неделя без движения</b>\nПо {len(apps)} откликам тишина. Отметь, "
+                    "что изменилось, а где тихо — можно напомнить о себе рекрутеру."
                 )
-                rows = [[button("📋 Открыть отклики", data="apl:")]]
+                rows = [[button("Открыть отклики", data="apl:", style=PRIMARY)]]
             try:
                 await self.reply(user, text, inline_keyboard(*rows))
             except Exception as exc:
@@ -2158,12 +2200,12 @@ class Bot:
             self.db.set_paused(user.id, False)
             user.stopped_at, user.paused = None, False
             if msg:
-                await self.edit(msg, "▶️ Продолжаем с прежними настройками.", None)
+                await self.edit(msg, "Продолжаем с прежними настройками ✓", None)
             await self.cmd_start(user, "")
         elif value == "reset":
             await self.reset_setup(user)
             if msg:
-                await self.edit(msg, "🔄 Начинаем заново — прежние настройки стёрты.", None)
+                await self.edit(msg, "Начинаем заново — прежние настройки стёрты.", None)
             await self.cmd_start(user, "")
         elif value == "cancel" and msg:
             await self.edit(msg, "Оставили всё как есть.", None)
@@ -2171,11 +2213,14 @@ class Bot:
     async def cmd_reset(self, user: User, args: str) -> None:
         await self.reply(
             user,
-            "<b>🔄 Настроить поиск заново?</b>\n\n"
+            "<b>Настроить поиск заново?</b>\n"
             "Сотру резюме, профиль и фильтры и задам вопросы с начала. "
             "Подписка и история вакансий сохранятся.",
             inline_keyboard(
-                [button("🔄 Да, заново", data="back:reset"), button("Отмена", data="back:cancel")]
+                [
+                    button("Да, заново", data="back:reset", style=DANGER),
+                    button("Отмена", data="back:cancel"),
+                ]
             ),
         )
 
@@ -2208,7 +2253,7 @@ class Bot:
             self._awaiting[user.id] = "queries_pq"
             await self.reply(
                 user,
-                "✍️ Напишите, что ищете — через запятую.\n"
+                "Напиши, что ищешь, через запятую.\n"
                 "Например: <i>python developer, тестировщик, аналитик данных</i>",
             )
         elif action == "level" and arg in r.LEVEL_BUTTONS:
@@ -2238,14 +2283,14 @@ class Bot:
             answered = True
         elif action == "salc":
             self._awaiting[user.id] = "salary_pq"
-            await self.reply(user, "💰 Напишите сумму в $ в месяц, например <b>1300</b>.")
+            await self.reply(user, "Напиши сумму в $ в месяц, например <b>1300</b>.")
         elif action == "next":
             if arg == "directions" and not user.filters.queries:
-                note = "Выберите хотя бы одно направление"
+                note = "Выбери хотя бы одно направление"
             elif arg == "work_formats" and not profile.work_formats:
-                note = "Выберите хотя бы один формат"
+                note = "Выбери хотя бы один формат"
             elif arg == "level" and not profile.target_levels():
-                note = "Выберите хотя бы один уровень"
+                note = "Выбери хотя бы один уровень"
             elif arg in ("directions", "level", "work_formats", "relocation_countries"):
                 if arg == "level":
                     profile.set_levels(profile.target_levels())
@@ -2272,8 +2317,8 @@ class Bot:
             self._awaiting[user.id] = "skills_pq"
             await self.reply(
                 user,
-                f"🧩 Сейчас: {escape(', '.join(profile.skills)) or '—'}\n\n"
-                "Напишите навыки через запятую — по ним вакансии отбираются бесплатно, до ИИ.",
+                f"Сейчас: <b>{escape(', '.join(profile.skills)) or '—'}</b>\n\n"
+                "Напиши навыки через запятую — по ним вакансии отбираются бесплатно, ещё до ИИ.",
             )
         elif value == "fmtcity":
             await self.show_fmtcity(user, msg or None)
@@ -2282,8 +2327,8 @@ class Bot:
             self._awaiting[user.id] = "wishes_pq"
             await self.reply(
                 user,
-                f"📝 Сейчас: {escape(profile.wishes) or '—'}\n\n"
-                "Напишите пожелания, которые не влезают в кнопки: район, метро, график, "
+                f"Сейчас: <b>{escape(profile.wishes) or '—'}</b>\n\n"
+                "Напиши пожелания, которые не влезают в кнопки: район, метро, график, "
                 "тип компании… Например: <i>Фрунзенский район или рядом с м. Пушкинская, "
                 "без ночных смен</i>. ИИ учтёт это при оценке. «-» — очистить.",
             )
@@ -2291,7 +2336,7 @@ class Bot:
             self._awaiting[user.id] = "nl"
             await self.reply(
                 user,
-                "✍️ Напишите, что поменять, своими словами. Например:\n"
+                "Напиши своими словами, что поменять. Например:\n"
                 "<i>хочу только гибрид в Минске, во Фрунзенском районе, от 1000$</i>",
             )
         elif value == "fill_missing":
@@ -2313,7 +2358,7 @@ class Bot:
         action, _, arg = value.partition(":")
         f = user.filters
         note = None
-        back = [button("⬅️ Назад", data="f:menu")]
+        back = [button(r.BACK, data="f:menu")]
         if action == "menu":
             text, markup = self._filters_menu(user)
             await self.edit(msg, text, markup)
@@ -2322,19 +2367,19 @@ class Bot:
                 note = self._toggle_query(user, r.DIRECTIONS[arg][1])
             await self.edit(
                 msg,
-                "<b>🔍 Направления</b>\nЧто ищем? Можно несколько.",
+                "<b>Направления</b>\nЧто ищем? Можно несколько.",
                 self._directions_markup(user, ctx="f"),
             )
         elif action == "dirx" and arg.isascii() and arg.isdigit() and int(arg) < len(f.queries):
             self._toggle_query(user, f.queries[int(arg)])
             await self.edit(
                 msg,
-                "<b>🔍 Направления</b>\nЧто ищем? Можно несколько.",
+                "<b>Направления</b>\nЧто ищем? Можно несколько.",
                 self._directions_markup(user, ctx="f"),
             )
         elif action == "custom":
             self._awaiting[user.id] = "queries"
-            await self.reply(user, "✍️ Напишите направления через запятую.")
+            await self.reply(user, "Напиши направления через запятую.")
         elif action == "lvl":
             if arg in r.LEVEL_BUTTONS:
                 f.levels = (
@@ -2343,7 +2388,7 @@ class Bot:
                 self._save_filter_edit(user, "levels")
             await self.edit(
                 msg,
-                "<b>🎓 Уровень</b>\nНичего не выбрано — любой.",
+                "<b>Уровень</b>\nНичего не выбрано — любой.",
                 self._toggle_markup("f", "lvl", r.LEVEL_BUTTONS, f.levels, nav=back),
             )
         elif action == "cty":
@@ -2356,7 +2401,7 @@ class Bot:
                 self._save_filter_edit(user, "countries")
             await self.edit(
                 msg,
-                "<b>🌍 Страны</b>\nНичего не выбрано — все.",
+                "<b>Страны</b>\nНичего не выбрано — все.",
                 self._toggle_markup("f", "cty", COUNTRIES, f.countries, nav=back),
             )
         elif action == "remote":
@@ -2367,14 +2412,14 @@ class Bot:
         elif action == "salary":
             self._awaiting[user.id] = "salary"
             await self.reply(
-                user, "💰 Минимальная зарплата в $ в месяц? Например <b>1200</b>. 0 — не важно."
+                user, "Минимальная зарплата в $ в месяц? Например <b>1200</b>. 0 — не важно."
             )
         elif action == "exclude":
             self._awaiting[user.id] = "exclude"
             current = escape(", ".join(f.exclude)) or "—"
             await self.reply(
                 user,
-                f"🚫 Сейчас: {current}\n\nНапишите стоп-слова через запятую — вакансии с ними "
+                f"Сейчас: <b>{current}</b>\n\nНапиши стоп-слова через запятую — вакансии с ними "
                 "в названии или компании я пропущу. «-» — очистить.",
             )
         elif action == "src":
@@ -2395,7 +2440,7 @@ class Bot:
             options = {str(v): f"{v}" for v in (40, 50, 60, 70, 80)}
             await self.edit(
                 msg,
-                "<b>🤖 Порог ИИ</b>\nПрисылать вакансии с оценкой не ниже… "
+                "<b>Порог ИИ</b>\nПрисылать вакансии с оценкой не ниже… "
                 "Ниже порог — больше вакансий, выше — только самые подходящие.",
                 self._toggle_markup(
                     "f", "thr", options, [str(f.ai_threshold)], nav=back, per_row=5
@@ -2417,7 +2462,7 @@ class Bot:
             try:
                 await self.api.set_star_subscription_canceled(user.id, user.sub_charge_id, True)
             except TelegramError as exc:
-                await self.api.answer_callback(cb["id"], "Не получилось, попробуйте позже")
+                await self.api.answer_callback(cb["id"], "Не получилось, попробуй позже")
                 log.warning("cancel subscription %s failed: %s", user.id, exc)
                 return
             self.db.set_subscription(user.id, None)

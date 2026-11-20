@@ -22,7 +22,7 @@ from jobspybot.limits import (
 )
 from jobspybot.models import Level
 
-WORK_FORMATS = {"remote": "🏠 Удалёнка", "hybrid": "🔀 Гибрид", "office": "🏢 Офис"}
+WORK_FORMATS = {"remote": "Удалёнка", "hybrid": "Гибрид", "office": "Офис"}
 #: страны для релокации (без «удалёнки из любой страны»)
 RELOCATION_COUNTRIES = {k: v for k, v in COUNTRIES.items() if k != "REMOTE"}
 SALARY_PRESETS = (500, 800, 1200, 1500, 2000, 3000)

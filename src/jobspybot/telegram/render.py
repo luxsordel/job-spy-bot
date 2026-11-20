@@ -1,4 +1,11 @@
-"""Тексты и экраны бота (Telegram HTML)."""
+"""Тексты и экраны бота (Telegram HTML).
+
+Стиль — минимализм: без эмодзи-украшений в каждой строке. Заголовок жирным, данные —
+карточками в <blockquote>, длинные справки — в сворачиваемых цитатах, акценты — цветом
+кнопок (Bot API 9.4). Эмодзи остаются только там, где несут смысл: флаги стран, 👍/👎,
+⭐ (валюта Telegram), цветные точки статусов и предупреждения для граждан РБ.
+Обращение — на «ты».
+"""
 
 from __future__ import annotations
 
@@ -12,36 +19,76 @@ from jobspybot.models import Level, Vacancy
 from jobspybot.profile import RELOCATION_COUNTRIES, WORK_FORMATS, UserProfile
 from jobspybot.sources import REGISTRY
 
-BRAND = "Job Spy"
+BRAND = "JobSpy"
+
+# --- общие элементы ------------------------------------------------------------
+
+#: отметка выбранного варианта на кнопке (плюс синий цвет кнопки)
+CHECK = "✓ "
+BACK = "← Назад"
+NEXT = "Далее →"
+TO_PROFILE = "← К профилю"
+
+
+def bar(value: int, total: int = 100, width: int = 10) -> str:
+    """«▰▰▰▰▰▰▱▱▱▱» — шкала оценки и прогресса анкеты."""
+    filled = max(0, min(width, round(value * width / total))) if total else 0
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def card(*lines: str) -> str:
+    """Блок данных в цитате (пустые строки выкидываются)."""
+    body = "\n".join(x for x in lines if x)
+    return f"<blockquote>{body}</blockquote>" if body else ""
+
+
+def field(label: str, value: str) -> str:
+    """«Уровень: <b>Junior</b>» — значение уже экранировано."""
+    return f"{label}: <b>{value}</b>"
+
 
 # --- главное меню (кнопки под полем ввода) -----------------------------------
 
-BTN_SEARCH = "🔎 Мой поиск"
-BTN_RESUMES = "📄 Резюме"
-BTN_FILTERS = "⚙️ Фильтры"
-BTN_PLAN = "💎 Подписка"
-BTN_STATS = "📊 Статистика"
-BTN_HELP = "❓ Помощь"
-BTN_PROFILE = "👤 Профиль"
-BTN_APPS = "📋 Отклики"
-BTN_MARKET = "📈 Рынок"
+BTN_SEARCH = "Поиск"
+BTN_PROFILE = "Профиль"
+BTN_RESUMES = "Резюме"
+BTN_FILTERS = "Фильтры"
+BTN_MARKET = "Рынок"
+BTN_APPS = "Отклики"
+BTN_PLAN = "Pro"
+BTN_HELP = "Помощь"
+BTN_STATS = "Статистика"
 MENU_ROWS = [
-    [BTN_SEARCH, BTN_PROFILE],
-    [BTN_RESUMES, BTN_FILTERS, BTN_MARKET],
-    [BTN_APPS, BTN_PLAN, BTN_HELP],
+    [BTN_SEARCH, BTN_PROFILE, BTN_RESUMES],
+    [BTN_FILTERS, BTN_MARKET, BTN_APPS],
+    [BTN_PLAN, BTN_HELP],
 ]
+#: подписи старого меню: клавиатура живёт у человека до следующего обновления
+LEGACY_MENU = {
+    "🔎 Мой поиск": BTN_SEARCH,
+    "📄 Резюме": BTN_RESUMES,
+    "⚙️ Фильтры": BTN_FILTERS,
+    "💎 Подписка": BTN_PLAN,
+    "📊 Статистика": BTN_STATS,
+    "❓ Помощь": BTN_HELP,
+    "👤 Профиль": BTN_PROFILE,
+    "📋 Отклики": BTN_APPS,
+    "📈 Рынок": BTN_MARKET,
+}
+MENU_PLACEHOLDER = "Пришли резюме PDF или напиши, что поменять"
 
-#: статусы отклика: (значок, подпись)
+#: статусы отклика: (точка статуса, подпись)
 APP_STATUS = {
-    "applied": ("✉️", "Отклик отправлен"),
-    "test": ("📝", "Тестовое"),
-    "interview": ("🗣", "Интервью"),
-    "offer": ("🎉", "Оффер"),
-    "rejected": ("❌", "Отказ"),
+    "applied": ("🔵", "Отклик отправлен"),
+    "test": ("🟡", "Тестовое"),
+    "interview": ("🟣", "Интервью"),
+    "offer": ("🟢", "Оффер"),
+    "rejected": ("⚪", "Отказ"),
 }
 APPS_EMPTY = (
-    "<b>📋 Мои отклики</b>\n\nПока пусто. Откликнулись на вакансию — нажмите под ней "
-    "<b>✅ Откликнулся</b>: я запишу её сюда, буду вести статус (тестовое, интервью, оффер) "
+    "<b>Отклики</b>\n\n"
+    "Пока пусто. Откликаешься на вакансию — нажми под ней <b>+ В отклики</b>. "
+    "Я запишу её сюда, буду вести статус — тестовое, интервью, оффер — "
     "и напомню, если работодатель молчит неделю."
 )
 
@@ -49,71 +96,64 @@ APPS_EMPTY = (
 
 #: ключ → (кнопка, поисковый запрос)
 DIRECTIONS: dict[str, tuple[str, str]] = {
-    "py": ("🐍 Python", "python developer"),
-    "java": ("☕ Java", "java developer"),
-    "fe": ("🌐 Frontend / JS", "frontend developer"),
-    "node": ("🟩 Node.js", "node.js developer"),
-    "cpp": ("⚙️ C / C++", "c++ developer"),
-    "cs": ("🟦 C# / .NET", "c# developer"),
-    "go": ("🐹 Go", "golang developer"),
-    "php": ("🐘 PHP", "php developer"),
-    "qa": ("🧪 QA / тестирование", "qa engineer"),
-    "ops": ("🛠 DevOps", "devops engineer"),
-    "data": ("📊 Data / ML", "data scientist"),
-    "mob": ("📱 Mobile", "mobile developer"),
-    "ai": ("🤖 AI / вайбкодинг", "ai developer"),
-    "an": ("🔍 Аналитик", "системный аналитик"),
-    "pm": ("📋 Project / Product", "project manager"),
-    "ux": ("🎨 UI/UX дизайн", "ui ux designer"),
+    "py": ("Python", "python developer"),
+    "java": ("Java", "java developer"),
+    "fe": ("Frontend / JS", "frontend developer"),
+    "node": ("Node.js", "node.js developer"),
+    "cpp": ("C / C++", "c++ developer"),
+    "cs": ("C# / .NET", "c# developer"),
+    "go": ("Go", "golang developer"),
+    "php": ("PHP", "php developer"),
+    "qa": ("QA / тестирование", "qa engineer"),
+    "ops": ("DevOps", "devops engineer"),
+    "data": ("Data / ML", "data scientist"),
+    "mob": ("Mobile", "mobile developer"),
+    "ai": ("AI / вайбкодинг", "ai developer"),
+    "an": ("Аналитик", "системный аналитик"),
+    "pm": ("Project / Product", "project manager"),
+    "ux": ("UI/UX дизайн", "ui ux designer"),
 }
 LEVEL_BUTTONS = {
-    Level.INTERN.value: "🌱 Стажёр",
-    Level.JUNIOR.value: "🐣 Junior",
-    Level.MIDDLE.value: "💼 Middle",
-    Level.SENIOR.value: "🚀 Senior",
-    Level.LEAD.value: "👑 Lead",
+    Level.INTERN.value: "Стажёр",
+    Level.JUNIOR.value: "Junior",
+    Level.MIDDLE.value: "Middle",
+    Level.SENIOR.value: "Senior",
+    Level.LEAD.value: "Lead",
 }
 
 
-FORMAT_BADGES = {"remote": "🏠 удалённо", "hybrid": "🔀 гибрид", "office": "🏢 офис"}
+FORMAT_BADGES = {"remote": "удалённо", "hybrid": "гибрид", "office": "офис"}
 
 
 def vacancy_card(v: Vacancy, extra: str = "") -> str:
+    """Карточка вакансии: название-ссылка, где, сколько, откуда; оценка ИИ — цитатой."""
     lines = [f'<b><a href="{escape(v.url, quote=True)}">{escape(v.title)}</a></b>']
-    where = " · ".join(
-        filter(
-            None,
-            [
-                f"🏢 {escape(v.company)}" if v.company else "",
-                f"📍 {escape(v.location)}" if v.location else "",
-                *[FORMAT_BADGES[f] for f in v.work_formats if f in FORMAT_BADGES],
-                "🏠 удалённо" if v.remote and not v.work_formats else "",
-            ],
-        )
-    )
+    formats = [FORMAT_BADGES[f] for f in v.work_formats if f in FORMAT_BADGES]
+    if v.remote and not formats:
+        formats = [FORMAT_BADGES["remote"]]
+    where = " · ".join(x for x in (escape(v.company), escape(v.location), *formats) if x)
     if where:
         lines.append(where)
+    salary = v.salary_text()
     meta = " · ".join(
-        filter(
-            None,
-            [
-                f"💰 {escape(v.salary_text())}" if v.salary_text() else "",
-                f"🎓 {LEVEL_TITLES[v.level]}" if v.level else "",
-            ],
+        x
+        for x in (
+            f"<b>{escape(salary)}</b>" if salary else "",
+            LEVEL_TITLES[v.level].capitalize() if v.level else "",
         )
+        if x
     )
     if meta:
         lines.append(meta)
     if v.address:
-        lines.append(f"🗺 {escape(v.address)}")
+        lines.append(escape(v.address))
+    if v.skills:
+        lines.append(escape(" · ".join(v.skills[:8])))
     source = REGISTRY[v.source].title if v.source in REGISTRY else v.source
     date = v.published_at.strftime("%d.%m") if v.published_at else ""
-    lines.append(f"🔎 {escape(source)}{' · ' + date if date else ''}")
-    if v.skills:
-        lines.append("🧩 " + escape(", ".join(v.skills[:8])))
+    lines.append(f"<i>{escape(source)}{' · ' + date if date else ''}</i>")
     if extra:
-        lines.append("")
-        lines.append(extra)
+        lines.append(extra if extra.startswith("<blockquote") else card(extra))
     return "\n".join(lines)
 
 
@@ -125,34 +165,47 @@ def date_ru(dt: datetime) -> str:
     return dt.strftime("%d.%m.%Y")
 
 
+def days_word(n: int) -> str:
+    """«1 день», «3 дня», «7 дней»."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} день"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} дня"
+    return f"{n} дней"
+
+
+def _every(minutes: int) -> str:
+    return f"{minutes // 60} ч" if minutes >= 60 else f"{minutes} мин"
+
+
 # --- экраны ------------------------------------------------------------------
 
 
 def welcome(name: str, trial_days: int) -> str:
-    hello = f"Привет, {escape(name)}! 👋" if name else "Привет! 👋"
+    hello = f"Привет, {escape(name)}!" if name else "Привет!"
     trial = (
-        f"\n\n🎁 Вам открыт <b>Pro на {trial_days} дней</b> бесплатно — "
-        "все функции без ограничений."
+        f"\n<b>Pro на {days_word(trial_days)} — бесплатно.</b> Все функции, без ограничений."
         if trial_days
         else ""
     )
     return (
-        f"{hello}\n\n"
-        f"Я <b>{BRAND}</b> — ищу работу вместо вас.\n\n"
-        "🔎 Слежу за <b>15 сайтами и Telegram-каналами</b>: Беларусь, Россия, Казахстан, "
-        "Грузия, Польша и удалёнка по миру\n"
-        "🤖 ИИ читает каждую вакансию и оценивает шанс на оффер под <b>ваше резюме</b>\n"
-        "🇧🇾 Предупреждаю, если вакансия недоступна гражданам РБ\n"
-        "📄 Выбираю лучшее из ваших резюме и пишу сопроводительное письмо"
-        f"{trial}\n\n"
-        "Настроим поиск за 1 минуту 👇\n\n"
-        "<i>Продолжая, вы соглашаетесь с /privacy — что я храню и как удалить данные.</i>"
+        f"<b>{hello}</b>\n"
+        f"Я {BRAND} — ищу работу, пока ты занимаешься своими делами.\n\n"
+        + card(
+            "• 15 сайтов и Telegram-каналов: Беларусь, Россия, Казахстан, Грузия, Польша "
+            "и удалёнка по миру",
+            "• ИИ читает каждую вакансию и оценивает шанс на оффер под твоё резюме",
+            "• Предупреждаю, если вакансия закрыта для граждан РБ",
+            "• Подбираю лучшее резюме и пишу сопроводительное письмо",
+        )
+        + f"{trial}\n\n"
+        "Настроим поиск за минуту.\n"
+        "<i>Продолжая, ты соглашаешься с /privacy — что я храню и как это удалить.</i>"
     )
 
 
 def onboarding_step(step: int, total: int, title: str, hint: str) -> str:
-    bar = "●" * step + "○" * (total - step)
-    return f"<b>Шаг {step} из {total}</b>  {bar}\n\n<b>{title}</b>\n{hint}"
+    return f"<b>{title}</b>\n{hint}\n\n{bar(step, total, total)}  {step} из {total}"
 
 
 def search_summary(
@@ -169,28 +222,34 @@ def search_summary(
     levels = ", ".join(LEVEL_BUTTONS.get(lv, lv) for lv in f.levels) or "любой"
     salary = f"от {f.min_salary_usd}$" if f.min_salary_usd else "не важна"
     if f.min_salary_usd and f.require_salary:
-        salary += " (без зарплаты — скрывать)"
+        salary += ", без вилки — скрывать"
     queries = f.queries
     over = len(queries) - plan.max_queries
-    q_text = _list(queries[: plan.max_queries], "<i>не заданы</i>")
+    q_line = field("Направления", _list(queries[: plan.max_queries], "не заданы"))
     if over > 0:
-        q_text += f" <i>(+{over} — в Pro)</i>"
-    every = f"{check_every_min // 60} ч" if check_every_min >= 60 else f"{check_every_min} мин"
-    status = "⏸ <b>на паузе</b>" if paused else f"▶️ активен, проверка каждые {every}"
+        q_line += f" <i>(+{over} — в Pro)</i>"
+    status = "⚪ На паузе" if paused else f"🟢 Активен · проверяю каждые {_every(check_every_min)}"
     return "\n".join(
         [
-            f"<b>🔎 Мой поиск</b> — {status}",
+            "<b>Поиск</b>",
+            status,
             "",
-            f"🔍 Направления: {q_text}",
-            f"🎓 Уровень: {escape(levels)}",
-            f"🌍 Страны: {escape(countries)}",
-            f"🏠 Только удалёнка: {'да' if f.remote_only else 'нет'}",
-            f"💰 Зарплата: {salary}",
-            f"🚫 Стоп-слова: {_list(f.exclude)}",
-            f"🔎 Площадки: {len([s for s in sources if s in REGISTRY])} "
-            f"из {len(available_sources)}",
-            f"📄 Резюме: {resumes or 'нет'}",
-            f"🤖 Порог ИИ: {f.ai_threshold}/100",
+            card(
+                q_line,
+                field("Уровень", escape(levels)),
+                field("Страны", escape(countries)),
+                field("Только удалёнка", "да" if f.remote_only else "нет"),
+                field("Зарплата", salary),
+                field("Стоп-слова", _list(f.exclude)),
+            ),
+            card(
+                field(
+                    "Площадки",
+                    f"{len([s for s in sources if s in REGISTRY])} из {len(available_sources)}",
+                ),
+                field("Резюме", str(resumes) if resumes else "нет"),
+                field("Порог ИИ", f"{f.ai_threshold}/100"),
+            ),
         ]
     )
 
@@ -207,9 +266,14 @@ def _years(value: float) -> str:
 
 
 def profile_card(
-    p: UserProfile, queries: list[str], *, title: str = "👤 Профиль", summary: str = ""
+    p: UserProfile, queries: list[str], *, title: str = "Профиль", summary: str = ""
 ) -> str:
     unknown = "<i>не указано</i>"
+
+    def val(label: str, value: str) -> str:
+        # «не указано» — курсивом, без жирного
+        return f"{label}: {value}" if value == unknown else field(label, value)
+
     head = " · ".join(escape(x) for x in (p.name, p.headline) if x)
     level = ", ".join(LEVEL_BUTTONS[lv] for lv in p.target_levels() if lv in LEVEL_BUTTONS)
     if not level and "levels" in p.answered:
@@ -218,9 +282,11 @@ def profile_card(
     level_line = " · ".join(x for x in (level, exp) if x) or unknown
     place = ", ".join(x for x in (p.city, p.country) if x)
     formats = ", ".join(WORK_FORMATS[f] for f in p.work_formats if f in WORK_FORMATS)
+    if p.only_home_city and p.city and formats:
+        formats += f" · только {p.city}"
     if p.relocation is True:
         where = ", ".join(RELOCATION_COUNTRIES.get(c, c) for c in p.relocation_countries)
-        reloc = "да" + (f" — {where}" if where else "")
+        reloc = "да" + (f" — {escape(where)}" if where else "")
     elif p.relocation is False:
         reloc = "нет"
     else:
@@ -236,39 +302,48 @@ def profile_card(
         lines.append(head)
     if summary:
         lines.append(f"<i>{escape(summary)}</i>")
-    # блоки через пустую строку: кто я → что умею → где и как работать → чего хочу
-    lines += ["", f"📊 Уровень: {level_line}"]
-    if p.education:
-        lines.append("🎓 Образование:")
-        lines += [f"    • {escape(e)}" for e in p.education]
-    lines += [
-        "",
-        f"🧩 Навыки: {_list(p.skills[:15], unknown)}",
-        f"🗣 Языки: {_list(p.languages, unknown)}",
-        "",
-        f"📍 Живу: {escape(place) if place else unknown} · гражданство {escape(p.citizenship)}",
-        f"🏢 Формат: {escape(formats) if formats else unknown}"
-        + (f" · только г. {escape(p.city)}" if p.only_home_city and p.city else ""),
-        f"✈️ Релокация: {reloc}",
-        "",
-        f"💰 Ожидания: {salary}",
-        f"🔍 Ищу: {_list(queries or p.directions, unknown)}",
-    ]
-    if p.wishes:
-        lines.append(f"📝 Пожелания: {escape(p.wishes)}")
+    lines.append("")
+    # карточки: кто я → что умею → где и как работать → чего хочу
+    lines.append(
+        card(
+            val("Уровень", level_line),
+            *(["Образование:", *(f"• {escape(e)}" for e in p.education)] if p.education else []),
+        )
+    )
+    lines.append(
+        card(
+            val("Навыки", _list(p.skills[:15], unknown)),
+            val("Языки", _list(p.languages, unknown)),
+        )
+    )
+    lines.append(
+        card(
+            val("Живу", escape(place) if place else unknown)
+            + f" · гражданство {escape(p.citizenship)}",
+            val("Формат", escape(formats) if formats else unknown),
+            val("Релокация", reloc),
+        )
+    )
+    lines.append(
+        card(
+            val("Зарплата", salary),
+            val("Ищу", _list(queries or p.directions, unknown)),
+            val("Пожелания", escape(p.wishes)) if p.wishes else "",
+        )
+    )
     return "\n".join(lines)
 
 
 QUESTION_TEXTS = {
-    "directions": ("Что ищем?", "Выберите направления или нажмите «✍️ Свой вариант»."),
+    "directions": ("Что ищем?", "Выбери направления или нажми «Свой вариант»."),
     "level": (
-        "Вакансии какого уровня показывать?",
-        "Можно несколько — например, Junior и Middle. Затем «Далее».",
+        "Какой уровень вакансий показывать?",
+        "Можно несколько — например, Junior и Middle.",
     ),
     "work_formats": ("Какой формат работы подходит?", "Можно несколько."),
-    "relocation": ("Готовы к релокации?", "Если да — подскажу вакансии с переездом."),
-    "relocation_countries": ("Куда готовы переехать?", "Можно несколько."),
-    "salary": ("Сколько хотите получать?", "В $ в месяц «на руки». Ниже — не покажу."),
+    "relocation": ("Рассматриваешь релокацию?", "Если да — буду показывать вакансии с переездом."),
+    "relocation_countries": ("В какие страны можно переехать?", "Можно несколько."),
+    "salary": ("Сколько хочешь получать?", "В $ в месяц, на руки. Меньше — не покажу."),
 }
 
 
@@ -302,17 +377,13 @@ def plan_screen(
     support: str,
 ) -> str:
     if plan is PRO and until:
-        kind = " (пробный)" if trial else ""
+        kind = " · пробный" if trial else ""
         renew = "продлится автоматически" if subscribed else "без автопродления"
-        head = f"💎 Ваш тариф: <b>Pro{kind}</b> до {date_ru(until)} — {renew}"
+        head = f"<b>{BRAND} Pro</b>{kind}\nАктивен до {date_ru(until)}, {renew}"
     elif plan is PRO:
-        head = "💎 Ваш тариф: <b>Pro</b> (администратор)"
+        head = f"<b>{BRAND} Pro</b>\nАктивен — администратор"
     else:
-        head = "🆓 Ваш тариф: <b>Free</b>"
-
-    def every(p: Plan) -> str:
-        m = p.check_every_min
-        return f"{m // 60} ч" if m >= 60 else f"{m} мин"
+        head = f"<b>{BRAND} Free</b>\nБесплатный тариф"
 
     rows = [
         ("", "Free", "Pro"),
@@ -321,81 +392,90 @@ def plan_screen(
         ("Вакансий в день", _fmt_limit(FREE.daily_vacancies), _fmt_limit(PRO.daily_vacancies)),
         ("ИИ-оценка", "≈3 в день", "все"),
         ("Отклик + письмо", "—", "✓"),
-        ("Проверка", f"раз в {every(FREE)}", f"раз в {every(PRO)}"),
+        (
+            "Проверка",
+            f"раз в {_every(FREE.check_every_min)}",
+            f"раз в {_every(PRO.check_every_min)}",
+        ),
     ]
     table = "\n".join(f"{a:<16}{b:<11}{c}" for a, b, c in rows)
     lines = [head, "", f"<pre>{escape(table)}</pre>"]
     if price_stars and not subscribed:
-        lines += ["", f"Pro — <b>{price_stars} ⭐ в месяц</b>, оплата звёздами Telegram в 2 клика."]
-        lines.append("Отменить можно в любой момент — Pro доработает до конца оплаченного месяца.")
+        lines += [
+            "",
+            f"Pro — <b>{price_stars} ⭐ в месяц</b>. Оплата звёздами Telegram в два касания, "
+            "отменить можно в любой момент — Pro доработает до конца оплаченного месяца.",
+        ]
     if support:
-        lines += ["", f"Вопросы и предложения: {escape(support)}"]
+        lines += ["", f"<i>Вопросы и идеи: {escape(support)}</i>"]
     return "\n".join(lines)
 
 
-HELP = f"""<b>{BRAND}</b> — ваш помощник в поиске работы.
+HELP = f"""<b>{BRAND}</b> — личный агент по поиску работы.
 
 <b>Как это работает</b>
-1. Я каждые полчаса проверяю 15 сайтов вакансий и Telegram-каналы по вашим направлениям.
-2. Бесплатно отсеиваю неподходящее: уровень, страна, стоп-слова, навыки.
-3. ИИ читает оставшиеся вакансии и ставит балл под ваше резюме.
-4. Присылаю только то, где есть шанс. Кнопка <b>📄 Отклик</b> — лучшее резюме и письмо.
+<blockquote>1. Каждые полчаса проверяю 15 сайтов и Telegram-каналы по твоим направлениям
+2. Бесплатно отсеиваю лишнее: уровень, страну, стоп-слова, чужой стек
+3. ИИ читает остальное и ставит балл под твоё резюме
+4. Присылаю только то, где есть шанс. «Отклик» — лучшее резюме и письмо</blockquote>
 
-<b>Меню</b>
-{BTN_SEARCH} — что и где ищем, статистика
-{BTN_PROFILE} — ваш профиль: заполняется из резюме, правится кнопками
+<b>Разделы</b>
+<blockquote expandable>{BTN_SEARCH} — что и где ищем, пауза
+{BTN_PROFILE} — заполняется из резюме, правится кнопками или словами
 {BTN_RESUMES} — загрузить PDF, список резюме
-{BTN_FILTERS} — направления, уровень, страны, зарплата…
-{BTN_APPS} — куда откликнулись и на каком этапе
-{BTN_MARKET} — сколько платят по вашим направлениям
-{BTN_PLAN} — тарифы и оплата
+{BTN_FILTERS} — направления, уровень, страны, зарплата, площадки
+{BTN_MARKET} — сколько платят по твоим направлениям
+{BTN_APPS} — куда откликнулся и на каком этапе
+{BTN_PLAN} — тариф и оплата</blockquote>
 
 <b>Подсказки</b>
-• Резюме — просто пришлите PDF в чат: я сам заполню профиль и настрою поиск.
-  Можно несколько резюме под разные роли.
-• 👎 под вакансией — скрыть её, ✅ Откликнулся — записать в отклики.
-• Свои направления: <code>/query python developer; тестировщик</code>
-• Стоп-слова: <code>/exclude senior, 1с</code>
+<blockquote expandable>• Пришли PDF — сам заполню профиль и настрою поиск
+• Можно несколько резюме под разные роли — выберу лучшее под каждую вакансию
+• Можно просто написать: <i>хочу только удалёнку от 1500$</i>
+• 👎 под вакансией — скрыть, «+ В отклики» — записать в трекер откликов
+• <code>/query python developer; тестировщик</code> — свои направления
+• <code>/exclude senior, 1с</code> — стоп-слова</blockquote>
 
-<b>Ваши данные</b>
-/privacy — что я храню и кому передаю
-/delete_me — удалить резюме, профиль и историю"""
+/privacy — что я храню · /delete_me — удалить всё"""
 
 
 def privacy_text(inactive_days: int, support: str = "") -> str:
     """Политика конфиденциальности простыми словами."""
+    keep = (
+        f"• Если не заходишь {days_word(inactive_days)} и нет активной подписки — "
+        "удаляю резюме, профиль и историю сам"
+        if inactive_days
+        else "• До твоей просьбы об удалении"
+    )
     lines = [
-        "<b>🔐 Ваши данные</b>",
+        "<b>Твои данные</b>",
+        "Не продаю и не передаю для рекламы. Храню только то, что нужно для подбора вакансий "
+        "и откликов.",
         "",
         "<b>Что храню</b>",
-        "• Telegram id и имя пользователя — чтобы присылать вакансии",
-        "• Резюме (текст и ссылку на файл в Telegram), профиль, фильтры",
-        "• Историю: какие вакансии прислал или отсеял — 30 дней",
-        "• Расход ИИ по дням и платежи Telegram Stars",
-        "",
-        "<b>Зачем</b> — только чтобы подбирать вакансии и писать отклики. "
-        "Не продаю и не передаю данные для рекламы.",
-        "",
-        "<b>Кому передаю</b>",
-        "• ИИ-провайдеру — текст резюме <b>без телефонов и email</b> и описания вакансий, "
-        "для оценки и писем",
-        "• Telegram — как любой бот",
-        "",
-        "<b>Сколько храню</b>",
-        "• Пока вы пользуетесь ботом",
-        (
-            f"• Если не заходите {inactive_days} дней и нет активной подписки — "
-            "удаляю резюме, профиль и историю автоматически"
-            if inactive_days
-            else "• До вашей просьбы об удалении"
+        card(
+            "• Telegram id и имя — чтобы присылать вакансии",
+            "• Резюме (текст и ссылку на файл в Telegram), профиль, фильтры",
+            "• Историю: какие вакансии прислал или отсеял — 30 дней",
+            "• Расход ИИ по дням и платежи Telegram Stars",
         ),
-        "• После удаления остаются только id, срок подписки и платежи — "
-        "для возвратов и чтобы пробный период нельзя было брать заново",
-        "",
+        "<b>Кому передаю</b>",
+        card(
+            "• ИИ-провайдеру — текст резюме <b>без телефонов и email</b> и описания вакансий, "
+            "для оценки и писем",
+            "• Telegram — как любой бот",
+        ),
+        "<b>Сколько храню</b>",
+        card(
+            "• Пока ты пользуешься ботом",
+            keep,
+            "• После удаления остаются только id, срок подписки и платежи — "
+            "для возвратов и чтобы пробный период нельзя было взять заново",
+        ),
         "Удалить всё сейчас — кнопка ниже или /delete_me.",
     ]
     if support:
-        lines += ["", f"Вопросы: {escape(support)}"]
+        lines += ["", f"<i>Вопросы: {escape(support)}</i>"]
     return "\n".join(lines)
 
 
@@ -405,8 +485,8 @@ def privacy_text(inactive_days: int, support: str = "") -> str:
 MARKET_QUERIES = 3
 MARKET_PLACES = 3
 MARKET_EMPTY = (
-    "<b>📈 Рынок зарплат</b>\n\nСначала выберите направления поиска — "
-    "покажу вилки по ним. Это делается в ⚙️ Фильтры → 🔍 Направления."
+    "<b>Рынок зарплат</b>\n\nСначала выбери направления поиска — покажу вилки по ним. "
+    f"Это в разделе {BTN_FILTERS} → Направления."
 )
 
 
@@ -419,21 +499,23 @@ def market_text(
 ) -> str:
     """«python developer → 🇧🇾 Беларусь → junior: 800–1 400 $ · медиана 1 100 $ (23)»."""
     lines = [
-        "<b>📈 Рынок зарплат</b>",
-        "<i>По вилкам из вакансий за 30 дней, $ в месяц: середина рынка и медиана.</i>",
+        "<b>Рынок зарплат</b>",
+        "<i>Вилки из вакансий за 30 дней, $ в месяц: середина рынка и медиана.</i>",
     ]
     for query, places in blocks:
         lines += ["", f"<b>{escape(query)}</b>"]
+        body: list[str] = []
         for country, ranges in places:
-            lines.append(country_title(country))
+            body.append(country_title(country))
             if not ranges:
-                lines.append("   мало вакансий с вилкой")
+                body.append("   мало вакансий с вилкой")
             for level, rng in ranges.items():
                 name = "все грейды" if level == "all" else LEVEL_TITLES[Level(level)]
-                lines.append(
+                body.append(
                     f"   {name}: <b>{_money(rng.low)}–{_money(rng.high)} $</b>"
                     f" · медиана {_money(rng.median)} $ ({rng.count})"
                 )
+        lines.append(card(*body))
     lines += [
         "",
         f"<i>Обновлено {built_at:%d.%m %H:%M} UTC. Вилки бывают до и после налогов, "
