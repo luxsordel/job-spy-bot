@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss">
+  <channel>
+    <title>We Work Remotely</title>
+    <item>
+      <title>Vertican: Senior Applied AI Engineer, Document Intelligence</title>
+      <region>Anywhere in the World</region>
+      <skills>Python, LLM</skills>
+      <category>Back-End Programming</category>
+      <description>&lt;p&gt;Build &lt;strong&gt;document AI&lt;/strong&gt; in Python.&lt;/p&gt;</description>
+      <pubDate>Fri, 20 Nov 2026 06:02:02 +0000</pubDate>
+      <guid>https://weworkremotely.com/remote-jobs/vertican-senior-applied-ai-engineer-document-intelligence</guid>
+      <link>https://weworkremotely.com/remote-jobs/vertican-senior-applied-ai-engineer-document-intelligence</link>
+    </item>
+    <item>
+      <title>Acme: Customer Support Specialist</title>
+      <region>USA Only</region>
+      <skills></skills>
+      <description>&lt;p&gt;Help customers.&lt;/p&gt;</description>
+      <pubDate>Thu, 19 Nov 2026 10:00:00 +0000</pubDate>
+      <link>https://weworkremotely.com/remote-jobs/acme-customer-support-specialist</link>
+    </item>
+  </channel>
+</rss>

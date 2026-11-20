@@ -1,0 +1,78 @@
+{
+ "totalCount": 2,
+ "jobs": [
+  {
+   "title": "Senior Software Engineer",
+   "excerpt": "We are an AI-first company building innovative agentic frameworks, the systems that let LLM-driven agents research, plan, and act reliably in production.",
+   "companyName": "Alien Intellect",
+   "companySlug": "alien-intellect",
+   "employmentType": "Full Time",
+   "minSalary": 2000,
+   "maxSalary": 3000,
+   "salaryPeriod": "monthly",
+   "seniority": [
+    "Senior",
+    "Manager"
+   ],
+   "currency": "USD",
+   "locationRestrictions": [],
+   "timezoneRestrictions": [
+    3.5
+   ],
+   "categories": [
+    "Senior-Software-Developer",
+    "Senior-Software-Engineer-Jobs",
+    "Senior-Engineer",
+    "Software-Engineer"
+   ],
+   "parentCategories": [
+    "Developer"
+   ],
+   "description": "<p>We are an <span><strong>AI-first</strong></span> company building innovative agentic frameworks, the systems that let LLM-driven agents research, plan, and act reliably in production. That means or",
+   "pubDate": 1793013430,
+   "expiryDate": 1795605430,
+   "applicationLink": "https://himalayas.app/companies/alien-intellect/jobs/senior-software-engineer-8699633569?utm_source=api",
+   "guid": "https://himalayas.app/companies/alien-intellect/jobs/senior-software-engineer-8699633569"
+  },
+  {
+   "title": "Python Framework Developer",
+   "excerpt": "You'll work directly with the founding team on developing: the company Python SDK, First-party Packages and Plugins and Bridges to third-party tools etc.",
+   "companyName": "SPLICE",
+   "companySlug": "hellosplice",
+   "employmentType": "Full Time",
+   "minSalary": null,
+   "maxSalary": null,
+   "salaryPeriod": "annual",
+   "seniority": [
+    "Senior"
+   ],
+   "currency": null,
+   "locationRestrictions": [
+    "United States"
+   ],
+   "timezoneRestrictions": [
+    -10,
+    -9,
+    -8,
+    -7,
+    -6,
+    -5,
+    14
+   ],
+   "categories": [
+    "Python-Developer",
+    "Python-Framework-Developer",
+    "SDK-Developer",
+    "Software-Engineer"
+   ],
+   "parentCategories": [
+    "Developer"
+   ],
+   "description": "<p>You'll work directly with the founding team on developing: the company Python SDK, First-party Packages and Plugins and Bridges to third-party tools etc.</p><ul>\n<li>Expert in Python (SDKs, package",
+   "pubDate": 1795107058,
+   "expiryDate": 1799358385,
+   "applicationLink": "https://himalayas.app/companies/hellosplice/jobs/python-framework-developer?utm_source=api",
+   "guid": "https://himalayas.app/companies/hellosplice/jobs/python-framework-developer"
+  }
+ ]
+}
