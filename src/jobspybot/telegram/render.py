@@ -1,9 +1,10 @@
 """Тексты и экраны бота (Telegram HTML).
 
-Стиль — минимализм: без эмодзи-украшений в каждой строке. Заголовок жирным, данные —
-карточками в <blockquote>, длинные справки — в сворачиваемых цитатах, акценты — цветом
-кнопок (Bot API 9.4). Эмодзи остаются только там, где несут смысл: флаги стран, 👍/👎,
-⭐ (валюта Telegram), цветные точки статусов и предупреждения для граждан РБ.
+Стиль — минимализм: без эмодзи-украшений в каждой строке и без цитат-плашек. Заголовок
+жирным, данные — простым списком «Подпись: <b>значение</b>», группы — через пустую строку.
+Цвет кнопок (Bot API 9.4) — только у одной главной кнопки экрана и у удаления.
+Эмодзи остаются только там, где несут смысл: флаги стран, 👍/👎, ⭐ (валюта Telegram),
+цветные точки статусов и предупреждения для граждан РБ.
 Обращение — на «ты».
 """
 
@@ -23,7 +24,7 @@ BRAND = "JobSpy"
 
 # --- общие элементы ------------------------------------------------------------
 
-#: отметка выбранного варианта на кнопке (плюс синий цвет кнопки)
+#: отметка выбранного варианта на кнопке
 CHECK = "✓ "
 BACK = "← Назад"
 NEXT = "Далее →"
@@ -37,9 +38,13 @@ def bar(value: int, total: int = 100, width: int = 10) -> str:
 
 
 def card(*lines: str) -> str:
-    """Блок данных в цитате (пустые строки выкидываются)."""
-    body = "\n".join(x for x in lines if x)
-    return f"<blockquote>{body}</blockquote>" if body else ""
+    """Группа строк одним блоком (пустые выкидываются); группы разделяют пустой строкой."""
+    return "\n".join(x for x in lines if x)
+
+
+def blocks(*groups: str) -> str:
+    """Склеить группы через пустую строку, пропуская пустые."""
+    return "\n\n".join(g for g in groups if g)
 
 
 def field(label: str, value: str) -> str:
@@ -153,7 +158,7 @@ def vacancy_card(v: Vacancy, extra: str = "") -> str:
     date = v.published_at.strftime("%d.%m") if v.published_at else ""
     lines.append(f"<i>{escape(source)}{' · ' + date if date else ''}</i>")
     if extra:
-        lines.append(extra if extra.startswith("<blockquote") else card(extra))
+        lines += ["", extra]
     return "\n".join(lines)
 
 
@@ -184,7 +189,7 @@ def _every(minutes: int) -> str:
 def welcome(name: str, trial_days: int) -> str:
     hello = f"Привет, {escape(name)}!" if name else "Привет!"
     trial = (
-        f"\n<b>Pro на {days_word(trial_days)} — бесплатно.</b> Все функции, без ограничений."
+        f"\n\n<b>Pro на {days_word(trial_days)} — бесплатно.</b> Все функции, без ограничений."
         if trial_days
         else ""
     )
@@ -242,6 +247,7 @@ def search_summary(
                 field("Зарплата", salary),
                 field("Стоп-слова", _list(f.exclude)),
             ),
+            "",
             card(
                 field(
                     "Площадки",
@@ -278,8 +284,8 @@ def profile_card(
     level = ", ".join(LEVEL_BUTTONS[lv] for lv in p.target_levels() if lv in LEVEL_BUTTONS)
     if not level and "levels" in p.answered:
         level = "любой"
-    exp = f"опыт {_years(p.experience_years)}" if p.experience_years else ""
-    level_line = " · ".join(x for x in (level, exp) if x) or unknown
+    exp = _years(p.experience_years) if p.experience_years else ""
+    level_line = level or unknown
     place = ", ".join(x for x in (p.city, p.country) if x)
     formats = ", ".join(WORK_FORMATS[f] for f in p.work_formats if f in WORK_FORMATS)
     if p.only_home_city and p.city and formats:
@@ -302,36 +308,30 @@ def profile_card(
         lines.append(head)
     if summary:
         lines.append(f"<i>{escape(summary)}</i>")
-    lines.append("")
-    # карточки: кто я → что умею → где и как работать → чего хочу
-    lines.append(
+    # группы: кто я → что умею → где и как работать → чего хочу
+    body = blocks(
         card(
             val("Уровень", level_line),
+            field("Опыт", exp) if exp else "",
             *(["Образование:", *(f"• {escape(e)}" for e in p.education)] if p.education else []),
-        )
-    )
-    lines.append(
+        ),
         card(
             val("Навыки", _list(p.skills[:15], unknown)),
             val("Языки", _list(p.languages, unknown)),
-        )
-    )
-    lines.append(
+        ),
         card(
-            val("Живу", escape(place) if place else unknown)
+            val("Город", escape(place) if place else unknown)
             + f" · гражданство {escape(p.citizenship)}",
             val("Формат", escape(formats) if formats else unknown),
             val("Релокация", reloc),
-        )
-    )
-    lines.append(
+        ),
         card(
             val("Зарплата", salary),
             val("Ищу", _list(queries or p.directions, unknown)),
             val("Пожелания", escape(p.wishes)) if p.wishes else "",
-        )
+        ),
     )
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n\n" + body
 
 
 QUESTION_TEXTS = {
@@ -414,27 +414,27 @@ def plan_screen(
 HELP = f"""<b>{BRAND}</b> — личный агент по поиску работы.
 
 <b>Как это работает</b>
-<blockquote>1. Каждые полчаса проверяю 15 сайтов и Telegram-каналы по твоим направлениям
+1. Каждые полчаса проверяю 15 сайтов и Telegram-каналы по твоим направлениям
 2. Бесплатно отсеиваю лишнее: уровень, страну, стоп-слова, чужой стек
 3. ИИ читает остальное и ставит балл под твоё резюме
-4. Присылаю только то, где есть шанс. «Отклик» — лучшее резюме и письмо</blockquote>
+4. Присылаю только то, где есть шанс. «Отклик» — лучшее резюме и письмо
 
 <b>Разделы</b>
-<blockquote expandable>{BTN_SEARCH} — что и где ищем, пауза
+{BTN_SEARCH} — что и где ищем, пауза
 {BTN_PROFILE} — заполняется из резюме, правится кнопками или словами
 {BTN_RESUMES} — загрузить PDF, список резюме
 {BTN_FILTERS} — направления, уровень, страны, зарплата, площадки
 {BTN_MARKET} — сколько платят по твоим направлениям
 {BTN_APPS} — куда откликнулся и на каком этапе
-{BTN_PLAN} — тариф и оплата</blockquote>
+{BTN_PLAN} — тариф и оплата
 
 <b>Подсказки</b>
-<blockquote expandable>• Пришли PDF — сам заполню профиль и настрою поиск
+• Пришли PDF — сам заполню профиль и настрою поиск
 • Можно несколько резюме под разные роли — выберу лучшее под каждую вакансию
 • Можно просто написать: <i>хочу только удалёнку от 1500$</i>
 • 👎 под вакансией — скрыть, «+ В отклики» — записать в трекер откликов
 • <code>/query python developer; тестировщик</code> — свои направления
-• <code>/exclude senior, 1с</code> — стоп-слова</blockquote>
+• <code>/exclude senior, 1с</code> — стоп-слова
 
 /privacy — что я храню · /delete_me — удалить всё"""
 
@@ -459,12 +459,14 @@ def privacy_text(inactive_days: int, support: str = "") -> str:
             "• Историю: какие вакансии прислал или отсеял — 30 дней",
             "• Расход ИИ по дням и платежи Telegram Stars",
         ),
+        "",
         "<b>Кому передаю</b>",
         card(
             "• ИИ-провайдеру — текст резюме <b>без телефонов и email</b> и описания вакансий, "
             "для оценки и писем",
             "• Telegram — как любой бот",
         ),
+        "",
         "<b>Сколько храню</b>",
         card(
             "• Пока ты пользуешься ботом",
@@ -472,6 +474,7 @@ def privacy_text(inactive_days: int, support: str = "") -> str:
             "• После удаления остаются только id, срок подписки и платежи — "
             "для возвратов и чтобы пробный период нельзя было взять заново",
         ),
+        "",
         "Удалить всё сейчас — кнопка ниже или /delete_me.",
     ]
     if support:

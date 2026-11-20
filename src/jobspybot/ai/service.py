@@ -177,7 +177,7 @@ class Analysis:
         if self.by != "ok" or self.by_note:
             icon = {"ok": "🇧🇾", "risk": "⚠️", "no": "⛔"}[self.by]
             lines.append(f"{icon} {escape(self.by_note or 'есть ограничения для граждан РБ')}")
-        return "<blockquote>" + "\n".join(lines) + "</blockquote>"
+        return "\n".join(lines)
 
 
 _SALVAGE = {
