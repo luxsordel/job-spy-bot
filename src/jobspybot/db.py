@@ -64,6 +64,21 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS ix_deliveries_fp ON deliveries(user_id, fingerprint);
 
+-- трекер откликов: название и ссылка копируются — старые вакансии из базы удаляются
+CREATE TABLE IF NOT EXISTS applications (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    vacancy_uid  TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    company      TEXT NOT NULL DEFAULT '',
+    url          TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL,  -- applied | test | interview | offer | rejected
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    reminded     INTEGER NOT NULL DEFAULT 0,  -- напомнили «нет ответа неделю»
+    UNIQUE (user_id, vacancy_uid)
+);
+
 -- оценка вакансии ИИ для конкретного профиля (одна вакансия — один запрос к модели)
 CREATE TABLE IF NOT EXISTS ai_cache (
     vacancy_uid   TEXT NOT NULL,
@@ -203,6 +218,32 @@ class Resume:
             return [str(s) for s in json.loads(self.profile).get("skills") or []]
         except (ValueError, AttributeError):
             return []
+
+
+#: статусы отклика по порядку воронки
+APPLICATION_STATUSES = ("applied", "test", "interview", "offer", "rejected")
+
+
+@dataclass(slots=True)
+class Application:
+    id: int
+    user_id: int
+    vacancy_uid: str
+    title: str
+    company: str
+    url: str
+    status: str
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> Application:
+        return cls(**{k: row[k] for k in cls.__slots__})
+
+    @property
+    def days(self) -> int:
+        """Сколько дней без изменений статуса."""
+        return max(0, (utcnow() - datetime.fromisoformat(self.updated_at)).days)
 
 
 class Database:
@@ -405,7 +446,14 @@ class Database:
         возвратов и учёта.
         """
         with self.conn:
-            for table in ("resumes", "profiles", "deliveries", "ai_usage", "counters"):
+            for table in (
+                "resumes",
+                "profiles",
+                "deliveries",
+                "applications",
+                "ai_usage",
+                "counters",
+            ):
                 self.conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
             self.conn.execute(
                 "UPDATE users SET username = '', filters = '{}', resume = '', profile = '',"
@@ -542,6 +590,72 @@ class Database:
             "SELECT status, COUNT(*) AS n FROM deliveries WHERE user_id = ? AND created_at >= ?"
             " GROUP BY status",
             (user_id, since),
+        )
+        return {r["status"]: r["n"] for r in rows}
+
+    # --- отклики --------------------------------------------------------------
+
+    def add_application(self, user_id: int, vacancy: Vacancy) -> int:
+        """Отметить отклик (повторная отметка не сбрасывает статус). Возвращает id."""
+        now = utcnow().isoformat()
+        self.conn.execute(
+            "INSERT INTO applications(user_id, vacancy_uid, title, company, url, status,"
+            " created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'applied', ?, ?)"
+            " ON CONFLICT(user_id, vacancy_uid) DO NOTHING",
+            (user_id, vacancy.uid, vacancy.title, vacancy.company, vacancy.url, now, now),
+        )
+        row = self.conn.execute(
+            "SELECT id FROM applications WHERE user_id = ? AND vacancy_uid = ?",
+            (user_id, vacancy.uid),
+        ).fetchone()
+        return int(row[0])
+
+    def applications(self, user_id: int) -> list[Application]:
+        """Отклики: сначала те, что в работе (свежие изменения первыми), потом закрытые."""
+        rows = self.conn.execute(
+            "SELECT * FROM applications WHERE user_id = ?"
+            " ORDER BY status IN ('offer', 'rejected'), updated_at DESC",
+            (user_id,),
+        )
+        return [Application.from_row(r) for r in rows]
+
+    def get_application(self, user_id: int, app_id: int) -> Application | None:
+        row = self.conn.execute(
+            "SELECT * FROM applications WHERE user_id = ? AND id = ?", (user_id, app_id)
+        ).fetchone()
+        return Application.from_row(row) if row else None
+
+    def set_application_status(self, user_id: int, app_id: int, status: str) -> bool:
+        cur = self.conn.execute(
+            "UPDATE applications SET status = ?, updated_at = ?, reminded = 0"
+            " WHERE user_id = ? AND id = ?",
+            (status, utcnow().isoformat(), user_id, app_id),
+        )
+        return cur.rowcount > 0
+
+    def delete_application(self, user_id: int, app_id: int) -> bool:
+        cur = self.conn.execute(
+            "DELETE FROM applications WHERE user_id = ? AND id = ?", (user_id, app_id)
+        )
+        return cur.rowcount > 0
+
+    def stale_applications(self, days: int) -> list[Application]:
+        """Отклики без движения `days` дней, о которых ещё не напоминали."""
+        before = (utcnow() - timedelta(days=days)).isoformat()
+        rows = self.conn.execute(
+            "SELECT * FROM applications WHERE status = 'applied' AND reminded = 0"
+            " AND updated_at < ? ORDER BY user_id, updated_at",
+            (before,),
+        )
+        return [Application.from_row(r) for r in rows]
+
+    def mark_reminded(self, app_id: int) -> None:
+        self.conn.execute("UPDATE applications SET reminded = 1 WHERE id = ?", (app_id,))
+
+    def application_funnel(self, user_id: int) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT status, COUNT(*) AS n FROM applications WHERE user_id = ? GROUP BY status",
+            (user_id,),
         )
         return {r["status"]: r["n"] for r in rows}
 

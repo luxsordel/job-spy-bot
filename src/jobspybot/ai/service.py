@@ -29,7 +29,7 @@ from jobspybot import feedback
 from jobspybot.ai.client import LLMClient, LLMError, parse_json
 from jobspybot.ai.compress import compress_description
 from jobspybot.config import AISettings
-from jobspybot.db import Database, Resume, User, utcnow
+from jobspybot.db import Application, Database, Resume, User, utcnow
 from jobspybot.filters import LEVEL_TITLES, local_score
 from jobspybot.models import Vacancy
 from jobspybot.resume_files import redact_contacts
@@ -94,6 +94,12 @@ PROFILE_EDIT_SYSTEM = """Пользователь бота поиска рабо
 LETTER_SYSTEM = """Напиши сопроводительное письмо к вакансии от лица кандидата, на языке \
 вакансии, до 900 символов. Конкретно: 2–3 факта из профиля, которые закрывают требования \
 вакансии. Без шаблонных фраз и выдуманных фактов. Только текст письма.
+"""
+
+FOLLOWUP_SYSTEM = """Кандидат неделю назад откликнулся на вакансию, ответа нет. Напиши короткое \
+вежливое сообщение рекрутеру от лица кандидата, на языке названия вакансии: напомнить об \
+отклике, одной фразой — чем полезен (из профиля), спросить о следующих шагах. 3–4 \
+предложения, на «Вы», без заискивания и выдуманных фактов. Только текст сообщения.
 """
 
 
@@ -485,6 +491,24 @@ class AIService:
             return None
 
     # --- письмо --------------------------------------------------------------
+
+    async def followup(self, user: User, app: Application) -> str:
+        """Черновик напоминания рекрутеру об отклике без ответа."""
+        if not self.has_budget(user):
+            return "Дневной лимит ИИ исчерпан, попробуйте завтра."
+        company = f", компания: {app.company}" if app.company else ""
+        try:
+            return await self._ask(
+                user,
+                f"{FOLLOWUP_SYSTEM}\nКандидат: {self.db.get_profile(user.id).context_line()}",
+                f"Вакансия: {app.title}{company}. Отклик отправлен {app.days} дн. назад.",
+                what="письмо рекрутеру",
+                max_tokens=300,
+                temperature=0.5,
+            )
+        except LLMError as exc:
+            log.warning("followup for %s failed: %s", user.id, exc)
+            return "ИИ сейчас недоступен, попробуйте позже."
 
     async def cover_letter(self, user: User, vacancy: Vacancy, resume: Resume) -> str:
         if not self.has_budget(user):
