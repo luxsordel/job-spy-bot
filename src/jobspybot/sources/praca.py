@@ -7,7 +7,7 @@ import re
 from selectolax.lexbor import LexborHTMLParser, LexborNode
 
 from jobspybot.models import Level, Vacancy
-from jobspybot.sources.base import Source, register
+from jobspybot.sources.base import Source, query_words, register
 from jobspybot.text import clean_ws, html_to_text, parse_day_month
 
 BASE = "https://praca.by"
@@ -36,8 +36,18 @@ class PracaBy(Source):
     countries = frozenset({"BY"})
 
     async def search(self, query: str) -> list[Vacancy]:
+        found = await self._search(query)
+        # сайт ищет все слова сразу: «python developer» даёт 0, хотя по «python» вакансии есть.
+        # Повторяем по значимым словам — общие вроде developer / разработчик отбрасываются
+        short = " ".join(query_words(query))
+        if not found and short != query.lower().strip():
+            found = await self._search(short)
+        return found
+
+    async def _search(self, query: str) -> list[Vacancy]:
+        # без `upped_period`: на praca.by мало IT-вакансий, а старые отрежет фильтр возраста
         html = await self.http.get_text(
-            f"{BASE}/search/vacancies/", params={"search[query]": query, "upped_period": 7}
+            f"{BASE}/search/vacancies/", params={"search[query]": query}
         )
         return self.parse_list(html)
 
