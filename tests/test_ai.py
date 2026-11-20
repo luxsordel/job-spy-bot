@@ -206,6 +206,21 @@ async def test_best_resume_is_chosen_from_shortlist(db):
     assert len(fake.requests) == 1  # best_resume взял выбор из кэша
 
 
+async def test_near_duplicate_resumes_go_to_model_once(db):
+    """Две версии одного резюме удваивали цену каждой оценки (у владельца ~6 000 токенов)."""
+    fake = FakeLLM()
+    ai = make_ai(db, fake)
+    user = db.ensure_user(1, allowed=True)
+    base = ["python", "fastapi", "sql", "docker", "git", "linux", "react", "c++", "qt", "java"]
+    add_resume(db, 1, "Резюме", {**PROFILE, "skills": [*base, "ci", "автотесты"]})
+    add_resume(db, 1, "Резюме (ИИ)", {**PROFILE, "skills": [*base, "ci/cd", "code review"]})
+    add_resume(db, 1, "QA", {**PROFILE, "skills": ["qa", "selenium", "тестирование"]})
+    await ai.evaluate(user, vac("1", "Python developer"))
+    system = fake.requests[0]["messages"][0]["content"]
+    # из двух версий осталась новая, другое по сути резюме (QA) — тоже
+    assert system.count("»: ") == 2 and "«Резюме (ИИ)»" in system and "«QA»" in system
+
+
 async def test_json_mode_fallback(db):
     fake = FakeLLM(json_mode=False)
     ai = make_ai(db, fake)

@@ -38,6 +38,28 @@ log = logging.getLogger(__name__)
 
 #: сколько резюме максимум отправлять в модель для одной вакансии
 MAX_RESUMES_PER_EVAL = 3
+#: резюме с таким сходством навыков — по сути одно и то же (две версии одного резюме)
+DUPLICATE_SKILLS = 0.7
+
+
+def distinct_resumes(resumes: list[Resume]) -> list[Resume]:
+    """Без почти одинаковых резюме: каждое лишнее удваивает цену оценки, а нового не даёт.
+
+    Из похожих остаётся самое новое; порядок остальных не меняется (стабильный кэш).
+    """
+    kept: list[tuple[Resume, set[str]]] = []
+    for resume in reversed(resumes):
+        skills = {s.lower() for s in resume.skills}
+        duplicate = skills and any(
+            len(skills & other) / len(skills | other) >= DUPLICATE_SKILLS
+            for _, other in kept
+            if other
+        )
+        if not duplicate:
+            kept.append((resume, skills))
+    ids = {r.id for r, _ in kept}
+    return [r for r in resumes if r.id in ids]
+
 
 PROFILE_SYSTEM = """Разбери резюме для автоматического подбора вакансий.
 Ответь только JSON; чего нет в резюме — null или пустое значение, ничего не выдумывай:
@@ -299,6 +321,7 @@ class AIService:
     @staticmethod
     def shortlist(resumes: list[Resume], vacancy: Vacancy) -> list[Resume]:
         """Бесплатный предотбор: в модель идут только самые близкие к вакансии резюме."""
+        resumes = distinct_resumes(resumes)
         if len(resumes) <= MAX_RESUMES_PER_EVAL:
             return resumes
         ranked = sorted(resumes, key=lambda r: local_score(vacancy, r.skills), reverse=True)
