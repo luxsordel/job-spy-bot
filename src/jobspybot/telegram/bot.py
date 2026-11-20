@@ -237,14 +237,12 @@ def without_buttons(msg: dict[str, Any], *prefixes: str) -> dict[str, Any]:
 
 
 def main_menu() -> dict[str, Any]:
-    return reply_keyboard(
-        *r.MENU_ROWS, placeholder=r.MENU_PLACEHOLDER, styles={r.BTN_PLAN: PRIMARY}
-    )
+    return reply_keyboard(*r.MENU_ROWS, placeholder=r.MENU_PLACEHOLDER)
 
 
 def toggle(label: str, data: str, on: bool) -> dict[str, str]:
     """Кнопка-переключатель: выбранная — с галочкой и синяя."""
-    return button(f"{r.CHECK}{label}" if on else label, data=data, style=PRIMARY if on else None)
+    return button(f"{r.CHECK}{label}" if on else label, data=data)
 
 
 MENU_HINT = "Меню — под полем ввода."
@@ -372,7 +370,7 @@ class Bot:
     async def send_vacancy(
         self, user: User, vacancy: Vacancy, delivery_id: int, extra: str = ""
     ) -> None:
-        row = [button("Открыть", url=vacancy.url, style=PRIMARY)]
+        row = [button("Открыть", url=vacancy.url)]
         row += [
             button(text, data=f"{p}:{delivery_id}") for p, (text, _) in self.extra_buttons.items()
         ]
@@ -898,7 +896,7 @@ class Bot:
             rows.append([button("Изменить словами", data="pe:nl")])
         if not user.onboarded:
             # онбординг: после разбора резюме человек проверяет профиль и идёт дальше
-            rows.insert(0, [button("Всё верно — дальше", data="ob:next", style=SUCCESS)])
+            rows.insert(0, [button("Всё верно — дальше", data="ob:next", style=PRIMARY)])
         elif missing:
             rows.insert(
                 0,
@@ -1023,10 +1021,10 @@ class Bot:
         self._pending_patch[user.id] = patch
         await self.reply(
             user,
-            "<b>Понял так</b>\n" + r.card(*(f"• {escape(x)}" for x in lines)) + "\nПрименить?",
+            "<b>Понял так</b>\n" + r.card(*(f"• {escape(x)}" for x in lines)) + "\n\nПрименить?",
             inline_keyboard(
                 [
-                    button("Применить", data="nl:apply", style=SUCCESS),
+                    button("Применить", data="nl:apply", style=PRIMARY),
                     button("Отмена", data="nl:cancel"),
                 ]
             ),
@@ -1122,7 +1120,7 @@ class Bot:
             check_every_min=plan.check_every_min,
         )
         pause = (
-            button("Возобновить", data="f:unpause", style=SUCCESS)
+            button("Возобновить", data="f:unpause", style=PRIMARY)
             if user.paused
             else button("Пауза", data="f:pause")
         )
@@ -1130,7 +1128,7 @@ class Bot:
             user,
             text,
             inline_keyboard(
-                [button("Изменить", data="f:menu", style=PRIMARY), pause],
+                [button("Изменить", data="f:menu"), pause],
                 [button("Статистика", data="st:show"), button("Профиль", data="pe:show")],
             ),
         )
@@ -1173,7 +1171,7 @@ class Bot:
                 f"<b>Тихие часы</b> — с {notify.QUIET_FROM}:00 до {notify.QUIET_TO:02d}:00 "
                 "не беспокою, присылаю утром",
             )
-            + f"\nЧасовой пояс: UTC{offset:+d}, у тебя сейчас {local}."
+            + f"\n\nЧасовой пояс: UTC{offset:+d}, у тебя сейчас {local}."
         )
 
         digest = f.notify_mode == notify.DIGEST
@@ -1248,7 +1246,7 @@ class Bot:
                 )
                 label = "Продлить Pro" if plan is PRO else "Подключить Pro"
                 rows.append(
-                    [button(f"{label} · {cfg.pro_price_stars} ⭐/мес", url=link, style=SUCCESS)]
+                    [button(f"{label} · {cfg.pro_price_stars} ⭐/мес", url=link, style=PRIMARY)]
                 )
             except TelegramError as exc:
                 log.warning("invoice link failed: %s", exc)
@@ -1278,7 +1276,7 @@ class Bot:
                 f"Отсеял ИИ как неподходящие: {s.get('ai_rejected', 0)}",
                 f"👍 {s.get('liked', 0)} · 👎 {s.get('disliked', 0)}",
             )
-            + f"\n<b>Сегодня</b>: {today}"
+            + f"\n\n<b>Сегодня</b>: {today}"
             + (f" из {limit}" if limit else "")
             + " вакансий, "
             f"ИИ — {tokens * 100 // max(1, self.billing.ai_token_limit(user))}% дневного лимита"
@@ -1557,7 +1555,7 @@ class Bot:
         for res in resumes:
             skills = ", ".join(res.skills[:8]) or "профиль ещё не готов"
             kind = "файл" if res.file_id else "текст"
-            lines.append(r.card(f"<b>{escape(res.title)}</b> · {kind}", escape(skills)))
+            lines += [r.card(f"<b>{escape(res.title)}</b> · {kind}", escape(skills)), ""]
         lines.append("Добавить — пришли ещё один PDF.")
         rows = [
             [button(f"Удалить «{res.title[:28]}»", data=f"rdel:{res.id}", style=DANGER)]

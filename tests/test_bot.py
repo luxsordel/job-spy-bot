@@ -742,5 +742,6 @@ async def test_selected_options_are_highlighted(bot, tg, db):
     await bot.handle_update(callback(ADMIN, "f:lvl:middle"))
     middle = next(b for b in buttons(tg) if "Middle" in b["text"])
     junior = next(b for b in buttons(tg) if "Junior" in b["text"])
-    assert middle["text"] == "✓ Middle" and middle["style"] == "primary"
-    assert "style" not in junior
+    # выбранное — только галочкой, без цветной заливки
+    assert middle["text"] == "✓ Middle" and "style" not in middle
+    assert junior["text"] == "Junior" and "style" not in junior

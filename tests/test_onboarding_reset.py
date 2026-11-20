@@ -142,7 +142,7 @@ async def test_parsed_resume_is_one_message_with_education(bot, tg, db):
     assert "БГЭУ, экономика, не окончено" in card
     assert card.count("sql") == 1
     assert "Потом спрошу" in card and "зарплату" in card
-    assert "</blockquote>\n<blockquote>Навыки" in card  # блоки — отдельными карточками
+    assert "\n\nНавыки: " in card and "<blockquote>" not in card  # группы через пустую строку
 
 
 async def test_failed_parse_still_explains(bot, tg, db):
