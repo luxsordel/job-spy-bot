@@ -31,6 +31,7 @@ def wire_ai(bot: Bot, ai: AIService) -> None:
     """Подключает ИИ к боту: профиль из резюме и кнопка «Отклик» под вакансиями."""
     bot.on_resume = ai.build_profile
     bot.on_profile_edit = ai.parse_profile_edit
+    bot.on_followup = ai.followup
     ai.token_limit = bot.billing.ai_token_limit
     # при нехватке общего бюджета ИИ остаток достаётся подписчикам
     ai.is_priority = lambda user: bot.billing.plan(user) is PRO
@@ -68,12 +69,16 @@ def wire_ai(bot: Bot, ai: AIService) -> None:
 
 
 async def plan_notices(bot: Bot, stop: asyncio.Event, every: float = 1800) -> None:
-    """Напоминания об окончании пробного периода и подписки."""
+    """Напоминания: окончание пробного периода и подписки, отклики без ответа."""
     while not stop.is_set():
         try:
             await bot.send_plan_notices()
         except Exception:
             log.exception("plan notices failed")
+        try:
+            await bot.send_application_reminders()
+        except Exception:
+            log.exception("application reminders failed")
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=every)
 

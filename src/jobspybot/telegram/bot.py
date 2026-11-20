@@ -15,7 +15,7 @@ from typing import Any
 from jobspybot import feedback, notify
 from jobspybot.billing import PRO, SUBSCRIPTION_PERIOD_SECONDS, Billing
 from jobspybot.config import Settings
-from jobspybot.db import Database, Resume, User, utcnow
+from jobspybot.db import Application, Database, Resume, User, utcnow
 from jobspybot.filters import COUNTRIES, UserFilters
 from jobspybot.guard import RateLimiter
 from jobspybot.limits import (
@@ -111,6 +111,7 @@ COMMANDS = [
     ("filters", "Фильтры"),
     ("resumes", "Мои резюме"),
     ("plan", "Подписка"),
+    ("applications", "Мои отклики"),
     ("stats", "Статистика"),
     ("help", "Помощь"),
     ("privacy", "Мои данные и их удаление"),
@@ -148,6 +149,12 @@ QUESTION_NAMES = {
 ResumeHook = Callable[[User, Resume], Awaitable[str]]
 EditHook = Callable[[User, str], Awaitable[dict[str, Any] | None]]
 CallbackHook = Callable[[User, dict[str, Any], str], Awaitable[None]]
+FollowupHook = Callable[[User, Application], Awaitable[str]]
+
+#: через сколько дней без движения напомнить об отклике
+FOLLOWUP_DAYS = 7
+#: сколько откликов показывать в списке
+MAX_APPS_SHOWN = 20
 
 
 def parse_list(raw: str) -> list[str]:
@@ -185,6 +192,38 @@ def merge_split_messages(updates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return merged
 
 
+def ago(days: int) -> str:
+    if days <= 0:
+        return "сегодня"
+    if days == 1:
+        return "вчера"
+    return f"{days} дн. назад"
+
+
+def funnel_line(funnel: dict[str, int], label: str = "📋 Отклики") -> str:
+    """«📋 Отклики: 5 — интервью 1 · оффер 1»; пусто, если откликов нет."""
+    total = sum(funnel.values())
+    if not total:
+        return ""
+    parts = [f"{r.APP_STATUS[s][1].lower()} {funnel[s]}" for s in r.APP_STATUS if funnel.get(s)]
+    return f"\n{label}: <b>{total}</b> — " + " · ".join(parts)
+
+
+def leading_int(value: str) -> int | None:
+    """«12:new» → 12; мусор из callback_data — None."""
+    head = value.split(":", 1)[0]
+    return int(head) if head.isascii() and head.isdigit() else None
+
+
+def without_buttons(msg: dict[str, Any], *prefixes: str) -> dict[str, Any]:
+    """Клавиатура сообщения без кнопок с данными на `prefixes` (пустые ряды убираются)."""
+    rows = msg.get("reply_markup", {}).get("inline_keyboard", [])
+    keep = [
+        [b for b in row if not str(b.get("callback_data", "")).startswith(prefixes)] for row in rows
+    ]
+    return inline_keyboard(*keep)
+
+
 def main_menu() -> dict[str, Any]:
     return reply_keyboard(*r.MENU_ROWS, placeholder="Пришлите PDF резюме или выберите раздел")
 
@@ -215,6 +254,8 @@ class Bot:
         self.extra_buttons: dict[str, tuple[str, CallbackHook]] = {}
         #: разбор фразы «хочу только гибрид…» в правку профиля (подключается модулем ИИ)
         self.on_profile_edit: EditHook | None = None
+        #: черновик письма рекрутеру, когда на отклик неделю нет ответа (модуль ИИ)
+        self.on_followup: FollowupHook | None = None
         self._pending_patch: dict[int, dict[str, Any]] = {}
         #: время (date из Telegram) последнего очень длинного сообщения пользователя
         self._long_text_at: dict[int, int] = {}
@@ -231,6 +272,7 @@ class Bot:
             r.BTN_FILTERS: self.show_filters,
             r.BTN_PLAN: self.show_plan,
             r.BTN_STATS: self.show_stats,
+            r.BTN_APPS: self.show_applications,
             r.BTN_PROFILE: self.show_profile,
             r.BTN_HELP: self.show_help,
         }
@@ -293,7 +335,9 @@ class Bot:
         row.append(button("👍", data=f"like:{delivery_id}"))
         row.append(button("👎", data=f"nope:{delivery_id}"))
         await self.api.send_message(
-            user.id, r.vacancy_card(vacancy, extra), reply_markup=inline_keyboard(row)
+            user.id,
+            r.vacancy_card(vacancy, extra),
+            reply_markup=inline_keyboard(row, [button("✅ Откликнулся", data=f"ap:{delivery_id}")]),
         )
 
     async def ai_limit_reached(self, user: User) -> None:
@@ -1200,7 +1244,8 @@ class Bot:
             f"🤖 Отсеял ИИ как неподходящие: {s.get('ai_rejected', 0)}\n"
             f"👍 Понравились: {s.get('liked', 0)} · 👎 скрыли: {s.get('disliked', 0)}\n\n"
             f"<b>Сегодня</b>: {today}" + (f" из {limit}" if limit else "") + " вакансий, "
-            f"ИИ — {tokens * 100 // max(1, self.billing.ai_token_limit(user))}% дневного лимита",
+            f"ИИ — {tokens * 100 // max(1, self.billing.ai_token_limit(user))}% дневного лимита"
+            + funnel_line(self.db.application_funnel(user.id)),
         )
 
     async def show_help(self, user: User) -> None:
@@ -1219,6 +1264,9 @@ class Bot:
 
     async def cmd_filters(self, user: User, args: str) -> None:
         await self.show_filters(user)
+
+    async def cmd_applications(self, user: User, args: str) -> None:
+        await self.show_applications(user)
 
     async def cmd_plan(self, user: User, args: str) -> None:
         await self.show_plan(user)
@@ -1827,6 +1875,11 @@ class Bot:
             "del": self._cb_delete_data,
             "nt": self._cb_notify,
             "back": self._cb_comeback,
+            "ap": self._cb_applied,
+            "apc": self._cb_app_card,
+            "aps": self._cb_app_status,
+            "apl": self._cb_app_list,
+            "apf": self._cb_app_followup,
         }.get(prefix)
         if handler:
             await handler(user, cb, value, msg)
@@ -1852,13 +1905,9 @@ class Bot:
             self.db.set_status(user.id, int(value), "liked")
         await self.api.answer_callback(cb["id"], "👍 Запомнил — буду искать похожие")
         if msg:
-            # 🔗 и «Отклик» остаются, реакции убираем
-            row = msg.get("reply_markup", {}).get("inline_keyboard", [[]])[0]
-            keep = [
-                b for b in row if not str(b.get("callback_data", "")).startswith(("like:", "nope:"))
-            ]
+            # 🔗, «Отклик» и «Откликнулся» остаются, реакции убираем
             await self.api.edit_reply_markup(
-                msg["chat"]["id"], msg["message_id"], inline_keyboard(keep)
+                msg["chat"]["id"], msg["message_id"], without_buttons(msg, "like:", "nope:")
             )
 
     async def _suggest_stop_word(self, user: User) -> None:
@@ -1902,6 +1951,173 @@ class Bot:
         if msg:
             text, markup = self._resumes_view(user)
             await self.edit(msg, text, markup)
+
+    # --- трекер откликов ------------------------------------------------------
+
+    async def show_applications(self, user: User, msg: dict[str, Any] | None = None) -> None:
+        apps = self.db.applications(user.id)
+        if not apps:
+            text, markup = r.APPS_EMPTY, None
+        else:
+            funnel = funnel_line(self.db.application_funnel(user.id), "Всего")
+            lines = [f"<b>📋 Мои отклики</b>{funnel}\n"]
+            buttons = []
+            for i, a in enumerate(apps[:MAX_APPS_SHOWN], 1):
+                icon = r.APP_STATUS.get(a.status, ("•", ""))[0]
+                company = f" — {escape(a.company)}" if a.company else ""
+                lines.append(f"{i}. {icon} {escape(a.title[:70])}{company} · {ago(a.days)}")
+                buttons.append(button(str(i), data=f"apc:{a.id}"))
+            if len(apps) > MAX_APPS_SHOWN:
+                lines.append(f"…и ещё {len(apps) - MAX_APPS_SHOWN}")
+            lines.append("\nНажмите номер, чтобы сменить статус.")
+            text = "\n".join(lines)
+            markup = inline_keyboard(*(buttons[i : i + 5] for i in range(0, len(buttons), 5)))
+        if msg:
+            await self.edit(msg, text, markup)
+        else:
+            await self.reply(user, text, markup)
+
+    def _app_card(self, a: Application) -> tuple[str, dict[str, Any]]:
+        icon, label = r.APP_STATUS.get(a.status, ("•", a.status))
+        link = f'\n<a href="{escape(a.url, quote=True)}">Открыть вакансию</a>' if a.url else ""
+        text = (
+            f"<b>{escape(a.title)}</b>"
+            + (f"\n{escape(a.company)}" if a.company else "")
+            + f"\n\nСтатус: {icon} {label} · {ago(a.days)}{link}"
+        )
+        others = [
+            button(f"{i} {lbl}", data=f"aps:{a.id}:{st}")
+            for st, (i, lbl) in r.APP_STATUS.items()
+            if st != a.status
+        ]
+        rows = [others[i : i + 2] for i in range(0, len(others), 2)]
+        if a.status == "applied" and self.on_followup:
+            rows.append([button("✍️ Написать рекрутеру", data=f"apf:{a.id}")])
+        rows.append(
+            [button("🗑 Удалить", data=f"aps:{a.id}:del"), button("⬅️ К списку", data="apl:")]
+        )
+        return text, inline_keyboard(*rows)
+
+    async def _cb_applied(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        """«✅ Откликнулся» под вакансией — записать в трекер."""
+        vacancy = (
+            self.db.delivery_vacancy(user.id, int(value))
+            if value.isascii() and value.isdigit()
+            else None
+        )
+        if vacancy is None:
+            await self.api.answer_callback(cb["id"], "Вакансия уже удалена из базы")
+            return
+        app_id = self.db.add_application(user.id, vacancy)
+        # откликнулся — значит, подошла: учтём при подборе, как 👍
+        self.db.set_status(user.id, int(value), "liked")
+        await self.api.answer_callback(cb["id"], "✅ Записал в 📋 Отклики — напомню через неделю")
+        if msg:
+            markup = without_buttons(msg, "ap:", "like:", "nope:")
+            markup["inline_keyboard"].append([button("📋 В откликах", data=f"apc:{app_id}:new")])
+            await self.api.edit_reply_markup(msg["chat"]["id"], msg["message_id"], markup)
+
+    async def _cb_app_card(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        await self.api.answer_callback(cb["id"])
+        app_id = leading_int(value)
+        a = self.db.get_application(user.id, app_id) if app_id is not None else None
+        if a is None:
+            await self.show_applications(user, msg or None)
+            return
+        text, markup = self._app_card(a)
+        if msg and not value.endswith(":new"):
+            await self.edit(msg, text, markup)
+        else:
+            await self.reply(user, text, markup)  # из карточки вакансии — новым сообщением
+
+    async def _cb_app_status(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        app_id = leading_int(value)
+        status = value.partition(":")[2]
+        if app_id is None:
+            await self.api.answer_callback(cb["id"])
+            return
+        if status == "del":
+            self.db.delete_application(user.id, app_id)
+            await self.api.answer_callback(cb["id"], "Удалено")
+            await self.show_applications(user, msg or None)
+            return
+        if status not in r.APP_STATUS or not self.db.set_application_status(
+            user.id, app_id, status
+        ):
+            await self.api.answer_callback(cb["id"])
+            return
+        icon, label = r.APP_STATUS[status]
+        cheer = " Поздравляю! 🥳" if status == "offer" else ""
+        await self.api.answer_callback(cb["id"], f"{icon} {label}{cheer}")
+        a = self.db.get_application(user.id, app_id)
+        assert a is not None
+        text, markup = self._app_card(a)
+        if msg:
+            await self.edit(msg, text, markup)
+        else:
+            await self.reply(user, text, markup)
+
+    async def _cb_app_list(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        await self.api.answer_callback(cb["id"])
+        await self.show_applications(user, msg or None)
+
+    async def _cb_app_followup(self, user: User, cb: dict, value: str, msg: dict) -> None:
+        """Черновик сообщения рекрутеру от ИИ (Pro — как и сопроводительное)."""
+        app_id = leading_int(value)
+        a = self.db.get_application(user.id, app_id) if app_id is not None else None
+        if a is None or self.on_followup is None:
+            await self.api.answer_callback(cb["id"])
+            return
+        if not self.billing.plan(user).apply_button:
+            await self.api.answer_callback(cb["id"], "Письма от ИИ — в 💎 Pro")
+            await self.show_plan(user)
+            return
+        await self.api.answer_callback(cb["id"])
+        async with self.thinking(user, "✍️ Пишу сообщение рекрутеру"):
+            draft = await self.on_followup(user, a)
+        await self.api.send_message(
+            user.id,
+            f"✉️ Черновик для «{a.title}» — скопируйте и отправьте рекрутеру:\n\n{draft}",
+            parse_mode=None,
+        )
+
+    async def send_application_reminders(self) -> None:
+        """Отклик неделю без движения — спросить, как дела, и предложить написать рекрутеру."""
+        by_user: dict[int, list[Application]] = {}
+        for a in self.db.stale_applications(FOLLOWUP_DAYS):
+            by_user.setdefault(a.user_id, []).append(a)
+        for uid, apps in by_user.items():
+            for a in apps:
+                self.db.mark_reminded(a.id)
+            user = self.db.get_user(uid)
+            if user is None or not user.allowed or user.banned or user.stopped_at:
+                continue
+            if len(apps) == 1:
+                a = apps[0]
+                company = f" ({escape(a.company)})" if a.company else ""
+                text = (
+                    f"⏰ Неделя прошла после отклика на «{escape(a.title)}»{company}. "
+                    "Есть новости? Если тишина — можно вежливо напомнить о себе рекрутеру."
+                )
+                rows = [
+                    [
+                        button("🗣 Позвали", data=f"aps:{a.id}:interview"),
+                        button("📝 Тестовое", data=f"aps:{a.id}:test"),
+                        button("❌ Отказ", data=f"aps:{a.id}:rejected"),
+                    ]
+                ]
+                if self.on_followup:
+                    rows.append([button("✍️ Написать рекрутеру", data=f"apf:{a.id}")])
+            else:
+                text = (
+                    f"⏰ По {len(apps)} откликам неделю нет движения. Отметьте, что изменилось, "
+                    "а где тишина — можно напомнить о себе рекрутеру."
+                )
+                rows = [[button("📋 Открыть отклики", data="apl:")]]
+            try:
+                await self.reply(user, text, inline_keyboard(*rows))
+            except Exception as exc:
+                log.info("application reminder to %s failed: %r", uid, exc)
 
     async def _cb_comeback(self, user: User, cb: dict, value: str, msg: dict) -> None:
         """«С возвращением»: продолжить с прежними настройками или начать заново."""
