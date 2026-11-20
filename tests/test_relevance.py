@@ -82,22 +82,27 @@ async def test_pipeline_drops_other_professions(db):
     assert stats.filtered == 3
 
 
-async def test_without_ai_budget_only_clear_matches_are_sent(db):
-    """ИИ не смог оценить — шлём только то, где роль ясна по названию, остальное ждёт."""
+async def test_without_ai_nothing_is_sent_and_user_is_told(db):
+    """ИИ не смог оценить — не шлём ничего, даже ясное по названию: вакансии подождут."""
     fake = FakeLLM()
     ai = make_ai(db, fake, daily_tokens_per_user=1)  # бюджет сразу исчерпан
-    db.add_tokens(1, 10)
     src = FakeSource("a", {"ai developer": [vac("1", "AI developer"), vac("2", "Разработчик")]})
     notifier = FakeNotifier()
+    told: list[int] = []
+
+    async def ai_limit_reached(user):
+        told.append(user.id)
+
+    notifier.ai_limit_reached = ai_limit_reached
     from jobspybot.pipeline import Pipeline
 
     add_user(db, 1, queries=["ai developer"])
     db.add_tokens(1, 10)
     pipeline = Pipeline(db, {"a": src}, notifier, Settings(), evaluator=ai)
     stats = await pipeline.run_cycle()
-    assert [uid for _, uid in notifier.sent] == ["a:1"]
-    assert stats.ai_deferred == 1 and not fake.requests
-    assert all(d["title"] != "Разработчик" for d in db.recent_deliveries(1))  # не записана
+    assert notifier.sent == [] and not fake.requests
+    assert stats.ai_deferred == 2 and told == [1]
+    assert db.recent_deliveries(1) == []  # не записаны — придут, когда ИИ заработает
 
 
 async def test_ai_scores_by_profile_when_resume_is_missing(db):

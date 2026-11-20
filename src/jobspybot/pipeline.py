@@ -327,17 +327,20 @@ class Pipeline:
         if use_ai:
             # дорогой этап — только лучшие по локальному баллу, остальные подождут
             candidates = candidates[: self.settings.ai.max_per_cycle]
-        for score, vacancy, fit in candidates:
+        for i, (score, vacancy, _fit) in enumerate(candidates):
             extra = ""
             ai_score: int | None = None
             if use_ai:
                 assert self.evaluator is not None
                 analysis = await self.evaluator.evaluate(user, vacancy)
-                if analysis is None and fit is not Fit.MATCH:
-                    # ИИ не смог оценить (кончился дневной лимит, сбой провайдера), а по
-                    # названию роль не ясна — не шлём наугад, вакансия подождёт следующего цикла
-                    stats.ai_deferred += 1
-                    continue
+                if analysis is None:
+                    # ИИ не смог оценить (кончился лимит, сбой провайдера). Без оценки не шлём
+                    # ничего — даже «подходящее по названию»: по одному названию приходило
+                    # совсем не то. Вакансии не записаны и дождутся, когда ИИ снова заработает;
+                    # остальных в этом цикле не трогаем — сбой у них был бы тот же.
+                    stats.ai_deferred += len(candidates) - i
+                    await self._ai_unavailable(user)
+                    break
                 if analysis is not None:
                     stats.ai_calls += 1
                     if analysis.score < user.filters.ai_threshold or analysis.by == "no":
@@ -364,6 +367,17 @@ class Pipeline:
                     score,
                     f", ИИ {ai_score}" if ai_score is not None else "",
                 )
+
+    async def _ai_unavailable(self, user: User) -> None:
+        """Сообщить человеку, что кончился его лимит ИИ (сбой провайдера — дело админа)."""
+        has_budget = getattr(self.evaluator, "has_budget", None)
+        hook = getattr(self.notifier, "ai_limit_reached", None)
+        if has_budget is None or hook is None or has_budget(user):
+            return
+        try:
+            await hook(user)
+        except Exception as exc:
+            log.warning("ai limit notice to %s failed: %r", user.id, exc)
 
     # --- отложенные: тихие часы и дайджест ------------------------------------
 
