@@ -122,6 +122,8 @@ COMMANDS = [
     ("plan", "Тариф Pro"),
     ("help", "Как это работает"),
     ("privacy", "Мои данные"),
+    ("terms", "Условия Pro"),
+    ("paysupport", "Помощь с оплатой"),
     ("reset", "Настроить поиск заново"),
 ]
 
@@ -148,6 +150,11 @@ TG_MAX_TEXT = 4096
 #: сообщение такой длины — вероятно, кусок длинного; следующие куски приходят в ту же секунду
 SPLIT_MIN_LEN = 3500
 SPLIT_GAP_SEC = 2
+#: команды, которые работают и без приглашения: Telegram требует их у ботов с оплатой
+PUBLIC_COMMANDS = ("terms", "paysupport")
+#: обращение в поддержку по оплате — не длиннее и не чаще (защита админа от спама)
+MAX_SUPPORT_CHARS = 1500
+SUPPORT_COOLDOWN_SEC = 600
 
 #: вопросы анкеты в винительном падеже — «потом спрошу …»
 QUESTION_NAMES = {
@@ -279,6 +286,8 @@ class Bot:
         self._pending_patch: dict[int, dict[str, Any]] = {}
         #: время (date из Telegram) последнего очень длинного сообщения пользователя
         self._long_text_at: dict[int, int] = {}
+        #: когда пользователь последний раз писал в поддержку по оплате (monotonic)
+        self._support_at: dict[int, float] = {}
         self.limiter = RateLimiter(settings.guard.rate_limit_per_min)
         #: обработка обновлений: по задаче на обновление, по замку на человека
         self._tasks: set[asyncio.Task[None]] = set()
@@ -589,6 +598,19 @@ class Bot:
             args = args.strip()
         else:
             cmd, args = "", text
+
+        if cmd in PUBLIC_COMMANDS:
+            self._awaiting.pop(user.id, None)
+            await getattr(self, f"cmd_{cmd}")(user, args)
+            return
+        if (
+            not cmd
+            and text not in self._menu_actions
+            and self._awaiting.get(user.id) == "paysupport"
+        ):
+            self._awaiting.pop(user.id)
+            await self._send_paysupport(user, text)
+            return
 
         if not user.allowed and not await self._admit(user, cmd, args, first_name):
             return
@@ -1349,6 +1371,66 @@ class Bot:
             inline_keyboard([button("Удалить мои данные", data="del:ask", style=DANGER)]),
         )
 
+    # --- условия и поддержка по оплате --------------------------------------
+
+    async def cmd_terms(self, user: User, args: str) -> None:
+        cfg = self.settings.billing
+        await self.reply(
+            user, r.terms_text(cfg.pro_price_stars, cfg.trial_days, cfg.support_contact)
+        )
+
+    async def cmd_paysupport(self, user: User, args: str) -> None:
+        if args:
+            await self._send_paysupport(user, args)
+            return
+        self._awaiting[user.id] = "paysupport"
+        await self.reply(user, r.PAYSUPPORT_ASK.format(days=r.days_word(r.REFUND_DAYS)))
+
+    async def _send_paysupport(self, user: User, text: str) -> None:
+        text = text.strip()
+        if not text:
+            self._awaiting[user.id] = "paysupport"
+            await self.reply(user, "Напиши проблему текстом одним сообщением.")
+            return
+        now = time.monotonic()
+        last = self._support_at.get(user.id)
+        if last is not None and now - last < SUPPORT_COOLDOWN_SEC and not self._is_admin(user):
+            await self.reply(
+                user, "Предыдущее обращение уже у администратора — дождись ответа, пожалуйста."
+            )
+            return
+        self._support_at[user.id] = now
+        if len(text) > MAX_SUPPORT_CHARS:
+            text = text[:MAX_SUPPORT_CHARS] + "…"
+        plan = self.billing.plan(user)
+        until = f" до {r.date_ru(user.plan_until)}" if plan is PRO and user.plan_until else ""
+        paid = "есть" if self.db.has_payments(user.id) else "нет"
+        renew = ", автопродление" if user.sub_charge_id else ""
+        await self.notify_admins(
+            f"🆘 <b>Оплата</b>: {escape(user.username or '—')} (<code>{user.id}</code>)\n"
+            f"Тариф: {plan.title}{until}{renew}; платежи: {paid}\n\n"
+            f"{escape(text)}\n\n"
+            f"Ответить: <code>/answer {user.id} текст</code>\n"
+            f"Вернуть звёзды: <code>/refund {user.id}</code>"
+        )
+        await self.reply(user, r.PAYSUPPORT_SENT)
+
+    async def cmd_answer(self, user: User, args: str) -> None:
+        if not self._is_admin(user):
+            return await self.reply(user, "Только для администратора.")
+        target, _, text = args.partition(" ")
+        target_id = parse_int(target)
+        if target_id is None or not text.strip():
+            return await self.reply(user, "Формат: <code>/answer ID текст</code>")
+        try:
+            await self.api.send_message(
+                target_id, f"<b>Ответ поддержки</b>\n\n{escape(text.strip())}"
+            )
+        except TelegramError as exc:
+            return await self.reply(user, f"Не удалось: {escape(exc.description)}")
+        self._support_at.pop(target_id, None)
+        await self.reply(user, "✅ Отправлено.")
+
     async def cmd_delete_me(self, user: User, args: str) -> None:
         await self._ask_delete(user)
 
@@ -1800,6 +1882,7 @@ class Bot:
             "/users — список\n"
             "<code>/grant ID ДНЕЙ</code> — выдать Pro\n"
             "<code>/refund ID</code> — вернуть последний платёж\n"
+            "<code>/answer ID текст</code> — ответить на /paysupport\n"
             "<code>/ban ID</code>, <code>/unban ID</code> — заблокировать / разблокировать"
             + (
                 "\n\n🖥 Веб-админка: "

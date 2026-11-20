@@ -698,6 +698,50 @@ async def test_privacy_and_delete_my_data(bot, tg, db):
     assert any("удалил свои данные" in t for t in tg.texts(ADMIN))
 
 
+async def test_terms_and_paysupport_work_without_invite(bot, tg, db):
+    # Telegram требует /terms и /paysupport у ботов с оплатой — даже для гостей
+    await bot.handle_update(message(GUEST, "/terms"))
+    terms = tg.texts(GUEST)[-1]
+    assert "Условия" in terms and "250 ⭐" in terms and "/paysupport" in terms
+    assert not any("Запрос доступа" in t for t in tg.texts(ADMIN))
+
+    await bot.handle_update(message(GUEST, "/paysupport"))
+    assert "Опиши проблему" in tg.texts(GUEST)[-1]
+    await bot.handle_update(message(GUEST, "Списались звёзды, а Pro <нет>"))
+    assert tg.texts(GUEST)[-1] == r.PAYSUPPORT_SENT
+    to_admin = tg.texts(ADMIN)[-1]
+    assert "&lt;нет&gt;" in to_admin and f"/answer {GUEST}" in to_admin
+    assert "платежи: нет" in to_admin
+
+    # повторно сразу — не дёргаем админа
+    admin_msgs = len(tg.texts(ADMIN))
+    await bot.handle_update(message(GUEST, "/paysupport ещё раз"))
+    assert len(tg.texts(ADMIN)) == admin_msgs and "дождись" in tg.texts(GUEST)[-1]
+
+    # ответ админа доходит и снимает ограничение
+    await bot.handle_update(message(ADMIN, f"/answer {GUEST} Вернул звёзды"))
+    assert "Ответ поддержки" in tg.texts(GUEST)[-1] and "Вернул звёзды" in tg.texts(GUEST)[-1]
+    await bot.handle_update(message(GUEST, "/paysupport спасибо"))
+    assert len(tg.texts(ADMIN)) > admin_msgs + 1
+
+
+async def test_paysupport_menu_button_cancels_and_answer_is_admin_only(bot, tg, db):
+    onboarded_user(db, GUEST, queries=["python developer"])
+    await bot.handle_update(message(GUEST, "/paysupport"))
+    await bot.handle_update(message(GUEST, r.BTN_SEARCH))
+    assert "<b>Поиск</b>" in tg.texts(GUEST)[-1]
+    assert not any("Оплата" in t for t in tg.texts(ADMIN))
+    await bot.handle_update(message(GUEST, f"/answer {ADMIN} привет"))
+    assert "Только для администратора" in tg.texts(GUEST)[-1]
+
+
+async def test_plan_screen_links_terms(db, tg):
+    bot = make_bot(db, tg, access_mode="open")
+    onboarded_user(db, GUEST)
+    await bot.handle_update(message(GUEST, "/plan"))
+    assert "/terms" in shown(tg) and "/paysupport" in shown(tg)
+
+
 async def test_help_and_welcome_mention_privacy(db, tg):
     bot = make_bot(db, tg, access_mode="open")
     await bot.handle_update(message(GUEST, "/start"))
