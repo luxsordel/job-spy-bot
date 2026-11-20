@@ -58,7 +58,8 @@ def wire_ai(bot: Bot, ai: AIService) -> None:
             await bot.api.send_document(
                 user.id, resume.file_id, f"📄 Резюме для «{escape(vacancy.title)}»"
             )
-        letter = await ai.cover_letter(user, vacancy, resume)
+        async with bot.thinking(user, "✍️ Пишу сопроводительное письмо"):
+            letter = await ai.cover_letter(user, vacancy, resume)
         await bot.api.send_message(
             user.id, f"✉️ {vacancy.title}\n{vacancy.url}\n\n{letter}", parse_mode=None
         )
