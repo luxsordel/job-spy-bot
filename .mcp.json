@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headersHelper": "python -c \"import json,subprocess;print(json.dumps({'Authorization':'Bearer '+subprocess.check_output(['gh','auth','token'],text=True).strip()}))\""
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    }
+  }
+}
