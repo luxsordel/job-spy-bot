@@ -11,11 +11,11 @@ from typing import Any
 
 from jobspybot import __version__
 from jobspybot.admin_web import AdminWeb, Runtime
-from jobspybot.ai.client import LLMClient
+from jobspybot.ai.client import LLMClient, LLMRouter, Route
 from jobspybot.ai.service import AIService
 from jobspybot.backup import Backups, backup_loop
 from jobspybot.billing import PRO, Billing
-from jobspybot.config import ConfigError, Settings
+from jobspybot.config import AISettings, ConfigError, Settings
 from jobspybot.db import Database, User
 from jobspybot.guard import AdminAlerts
 from jobspybot.http import Http
@@ -25,6 +25,23 @@ from jobspybot.telegram.api import TelegramAPI
 from jobspybot.telegram.bot import Bot
 
 log = logging.getLogger(__name__)
+
+
+def build_llm_chain(ai: AISettings) -> LLMRouter:
+    """Бесплатные провайдеры по порядку, платный (и его запасная модель) — последними."""
+    routes = [
+        # без повторов: упёрся в лимит — сразу к следующему, а не ждать 6 секунд
+        Route(p.name, LLMClient(p.base_url, p.api_key, p.model, timeout=40, attempts=1), p.model)
+        for p in ai.free
+    ]
+    if ai.paid_enabled:
+        paid = LLMClient(ai.base_url, ai.api_key, ai.model)
+        if ai.fallback_model and ai.fallback_model != ai.model:
+            routes.append(Route("paid", paid, ai.model))
+            routes.append(Route("paid-fallback", paid, ai.fallback_model))
+        else:
+            routes.append(Route("paid", paid, ai.model))
+    return LLMRouter(routes)
 
 
 def wire_ai(bot: Bot, ai: AIService) -> None:
@@ -133,17 +150,16 @@ async def run(settings: Settings, runtime: Runtime | None = None) -> bool:
     logging.getLogger("jobspybot").addHandler(alerts)
     pipeline.on_alert = lambda key, text, cooldown: alerts.alert(key, text, cooldown_s=cooldown)
 
-    llm: LLMClient | None = None
-    if settings.ai.enabled:
-        llm = LLMClient(settings.ai.base_url, settings.ai.api_key, settings.ai.model)
+    llm = build_llm_chain(settings.ai) if settings.ai.enabled else None
+    if llm:
         ai = AIService(db, llm, settings.ai)
         ai.describe = pipeline.describe
         ai.on_alert = alerts.alert
         pipeline.evaluator = ai
         wire_ai(bot, ai)
-        log.info("AI enabled: model %s", settings.ai.model)
+        log.info("AI enabled: %s", llm.model)
     else:
-        log.info("AI disabled: set AI_BASE_URL, AI_API_KEY and AI_MODEL to enable")
+        log.info("AI disabled: set AI_BASE_URL/AI_API_KEY/AI_MODEL or AI_<PROVIDER>_KEY")
 
     stop = runtime.stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -182,6 +198,7 @@ async def run(settings: Settings, runtime: Runtime | None = None) -> bool:
                 alerts=alerts,
                 runtime=runtime,
                 backups=backups,
+                llm=llm,
             )
             tasks.append(asyncio.create_task(web.serve(stop), name="admin-web"))
         await bot.notify_admins(f"🔄 Бот запущен (v{__version__})")

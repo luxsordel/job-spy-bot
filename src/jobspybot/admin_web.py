@@ -35,7 +35,9 @@ from jobspybot import __version__
 from jobspybot.backup import Backups, run_and_send
 from jobspybot.billing import PRO, Billing
 from jobspybot.config import (
+    DEFAULT_FREE_ORDER,
     EDITABLE_KEYS,
+    FREE_AI_PRESETS,
     SECRET_KEYS,
     ConfigError,
     Settings,
@@ -49,6 +51,7 @@ from jobspybot.limits import MAX_GRANT_DAYS, parse_int
 from jobspybot.telegram import render as r
 
 if TYPE_CHECKING:
+    from jobspybot.ai.client import LLMRouter
     from jobspybot.guard import AdminAlerts, LogBuffer
     from jobspybot.pipeline import Pipeline
     from jobspybot.telegram.bot import Bot
@@ -174,6 +177,11 @@ def effective_values(s: Settings) -> dict[str, str]:
         "AI_DAILY_TOKENS_TOTAL": ai.daily_tokens_total,
         "AI_PRO_RESERVE_PCT": ai.pro_reserve_pct,
         "AI_FALLBACK_MODEL": ai.fallback_model,
+        "AI_FREE_ORDER": DEFAULT_FREE_ORDER,
+        **{f"AI_{n.upper()}_KEY": "" for n in FREE_AI_PRESETS},
+        **{f"AI_{n.upper()}_MODEL": m for n, (_url, m) in FREE_AI_PRESETS.items()},
+        **{f"AI_{p.name.upper()}_KEY": p.api_key for p in ai.free},
+        **{f"AI_{p.name.upper()}_MODEL": p.model for p in ai.free},
         "RATE_LIMIT_PER_MIN": g.rate_limit_per_min,
         "MAX_UPLOADS_PER_DAY": g.max_uploads_per_day,
         "DELETE_INACTIVE_DAYS": g.inactive_days,
@@ -428,8 +436,10 @@ class AdminWeb:
         alerts: AdminAlerts | None = None,
         runtime: Runtime | None = None,
         backups: Backups | None = None,
+        llm: LLMRouter | None = None,
     ) -> None:
         self.backups = backups
+        self.llm = llm
         self.runtime = runtime or Runtime()
         self.settings = settings
         self.db = db
@@ -1289,6 +1299,8 @@ class AdminWeb:
             "ai_tokens_today": self.db.tokens_since(utcnow().date().isoformat()),
             "ai_tokens_month": self.db.tokens_since(utcnow().replace(day=1).date().isoformat()),
             "ai_daily_tokens_total": self.settings.ai.daily_tokens_total,
+            # цепочка ИИ-провайдеров: сколько ответов и ошибок с запуска, кто отложен
+            "ai_providers": self.llm.status() if self.llm else [],
             "backups": self._backups_json(),
             "last_cycle_at": pipe.last_cycle_at if pipe else None,
             "last_cycle": pipe.last_cycle.__dict__ if pipe and pipe.last_cycle else None,

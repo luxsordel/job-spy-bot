@@ -58,9 +58,43 @@ def load_env(
 OVERRIDES_FILE = "settings.env"
 
 
+def _free_ai(env: Mapping[str, str]) -> tuple[AIProvider, ...]:
+    if env.get("AI_FREE_ORDER", "").strip().lower() in ("-", "0", "off"):
+        return ()
+    order = [n.lower() for n in _csv(env, "AI_FREE_ORDER")] or DEFAULT_FREE_ORDER.split(",")
+    unknown = [n for n in order if n not in FREE_AI_PRESETS]
+    if unknown:
+        raise ConfigError(
+            f"AI_FREE_ORDER: неизвестные провайдеры {', '.join(unknown)} "
+            f"(есть: {', '.join(FREE_AI_PRESETS)})"
+        )
+    providers = []
+    for name in dict.fromkeys(order):
+        key = env.get(f"AI_{name.upper()}_KEY", "").strip()
+        if not key:
+            continue
+        base_url, model = FREE_AI_PRESETS[name]
+        model = env.get(f"AI_{name.upper()}_MODEL", "").strip() or model
+        providers.append(AIProvider(name, base_url, key, model))
+    return tuple(providers)
+
+
 def overrides_path(env: Mapping[str, str]) -> Path:
     db_path = Path(env.get("DB_PATH", "").strip() or "data/jobspy.sqlite3")
     return db_path.parent / OVERRIDES_FILE
+
+
+#: бесплатные OpenAI-совместимые провайдеры: имя → (адрес API, модель по умолчанию).
+#: Ключ — AI_<ИМЯ>_KEY, другая модель — AI_<ИМЯ>_MODEL. Порядок опроса — AI_FREE_ORDER;
+#: провайдер без ключа пропускается. Платный AI_BASE_URL/AI_MODEL идёт последним.
+FREE_AI_PRESETS: dict[str, tuple[str, str]] = {
+    "groq": ("https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    "cerebras": ("https://api.cerebras.ai/v1", "qwen-3-235b-a22b-instruct-2507"),
+    "openrouter": ("https://openrouter.ai/api/v1", "meta-llama/llama-3.3-70b-instruct:free"),
+    "mistral": ("https://api.mistral.ai/v1", "mistral-small-latest"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-flash-latest"),
+}
+DEFAULT_FREE_ORDER = "groq,cerebras,openrouter,mistral,gemini"
 
 
 #: что можно менять из веб-админки. Токены Telegram и самой админки, адрес, порт, база
@@ -85,6 +119,8 @@ EDITABLE_KEYS = (
     "AI_DAILY_TOKENS_TOTAL",
     "AI_PRO_RESERVE_PCT",
     "AI_FALLBACK_MODEL",
+    "AI_FREE_ORDER",
+    *(f"AI_{name.upper()}_{part}" for name in FREE_AI_PRESETS for part in ("KEY", "MODEL")),
     "RATE_LIMIT_PER_MIN",
     "MAX_UPLOADS_PER_DAY",
     "DELETE_INACTIVE_DAYS",
@@ -95,7 +131,9 @@ EDITABLE_KEYS = (
     "BACKUP_TO_TELEGRAM",
 )
 #: значения не показываются, только «задано / не задано»
-SECRET_KEYS = frozenset({"SUPERJOB_API_KEY", "AI_API_KEY"})
+SECRET_KEYS = frozenset(
+    {"SUPERJOB_API_KEY", "AI_API_KEY", *(f"AI_{name.upper()}_KEY" for name in FREE_AI_PRESETS)}
+)
 
 
 def save_overrides(path: Path, changes: Mapping[str, str]) -> dict[str, str]:
@@ -170,6 +208,14 @@ def _tg_channels(env: Mapping[str, str]) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class AIProvider:
+    name: str
+    base_url: str
+    api_key: str
+    model: str
+
+
+@dataclass(frozen=True, slots=True)
 class AISettings:
     base_url: str = ""
     api_key: str = ""
@@ -183,10 +229,16 @@ class AISettings:
     pro_reserve_pct: int = 20
     #: запасная модель, если основная не отвечает (пусто — нет)
     fallback_model: str = ""
+    #: бесплатные провайдеры — опрашиваются раньше платного, по порядку
+    free: tuple[AIProvider, ...] = ()
+
+    @property
+    def paid_enabled(self) -> bool:
+        return bool(self.base_url and self.api_key and self.model)
 
     @property
     def enabled(self) -> bool:
-        return bool(self.base_url and self.api_key and self.model)
+        return self.paid_enabled or bool(self.free)
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +354,7 @@ class Settings:
                 daily_tokens_total=_int(env, "AI_DAILY_TOKENS_TOTAL", 0),
                 pro_reserve_pct=_int(env, "AI_PRO_RESERVE_PCT", 20),
                 fallback_model=env.get("AI_FALLBACK_MODEL", "").strip(),
+                free=_free_ai(env),
             ),
             guard=GuardSettings(
                 rate_limit_per_min=_int(env, "RATE_LIMIT_PER_MIN", 30),

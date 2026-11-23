@@ -6,10 +6,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from jobspybot.ai.client import LLMClient, LLMError, parse_json
+from jobspybot.ai.client import LLMClient, LLMError, LLMRouter, Route, cooldown_for, parse_json
 from jobspybot.ai.compress import compress_description
 from jobspybot.ai.service import AIService, Analysis
-from jobspybot.config import AISettings, Settings
+from jobspybot.app import build_llm_chain
+from jobspybot.config import AIProvider, AISettings, ConfigError, Settings
 from jobspybot.filters import UserFilters
 from jobspybot.models import Vacancy
 from jobspybot.pipeline import Pipeline
@@ -393,15 +394,139 @@ async def test_fallback_model(db):
     def flaky(request):
         model = json.loads(request.content)["model"]
         seen.append(model)
-        if model == "model":
+        if model == "m":
             return httpx.Response(401, json={"error": "model unavailable"})
         return fake(request)
 
-    llm = LLMClient("https://llm.test/v1", "key", "model", transport=httpx.MockTransport(flaky))
-    ai = AIService(
-        db, llm, AISettings(base_url="x", api_key="k", model="m", fallback_model="spare")
+    settings = AISettings(
+        base_url="https://llm.test/v1", api_key="k", model="m", fallback_model="spare"
     )
+    paid = LLMClient(settings.base_url, "k", "m", transport=httpx.MockTransport(flaky))
+    llm = LLMRouter([Route("paid", paid, "m"), Route("paid-fallback", paid, "spare")])
+    ai = AIService(db, llm, settings)
     user = db.ensure_user(1, allowed=True)
     rid = db.add_resume(1, "CV", "Python developer " * 10)
     reply = await ai.build_profile(user, db.get_resume(1, rid))
-    assert "разобрано" in reply and seen == ["model", "spare"]
+    assert "разобрано" in reply and seen == ["m", "spare"]
+
+
+def _route(name: str, handler, *, attempts: int = 1) -> Route:
+    client = LLMClient(
+        f"https://{name}.test/v1",
+        "key",
+        f"{name}-model",
+        attempts=attempts,
+        transport=httpx.MockTransport(handler),
+    )
+    return Route(name, client, f"{name}-model")
+
+
+def _ok(request):
+    return FakeLLM()(request)
+
+
+async def test_router_goes_down_the_chain_and_rests_failed():
+    calls: list[str] = []
+    now = [1000.0]
+
+    def limited(request):
+        calls.append(request.url.host)
+        return httpx.Response(429, json={"error": "Rate limit exceeded: requests per day"})
+
+    def down(request):
+        calls.append(request.url.host)
+        return httpx.Response(503, json={"error": "overloaded"})
+
+    def paid(request):
+        calls.append(request.url.host)
+        return _ok(request)
+
+    router = LLMRouter(
+        [_route("groq", limited), _route("cerebras", down), _route("paid", paid)],
+        clock=lambda: now[0],
+    )
+    reply = await router.chat("Разбери резюме", "text", max_tokens=10)
+    assert reply.provider == "paid" and reply.tokens == 360
+    assert calls == ["groq.test", "cerebras.test", "paid.test"]
+
+    # оба бесплатных отложены — следующий запрос сразу к платному
+    calls.clear()
+    now[0] += 30
+    await router.chat("Разбери резюме", "text", max_tokens=10)
+    assert calls == ["paid.test"]
+
+    # минутная пауза cerebras (5xx) прошла, суточная groq — ещё нет
+    calls.clear()
+    now[0] += 60
+    await router.chat("Разбери резюме", "text", max_tokens=10)
+    assert calls == ["cerebras.test", "paid.test"]
+
+    status = {s["name"]: s for s in router.status()}
+    assert status["groq"]["resting_s"] > 25 * 60 and status["groq"]["failed"] == 1
+    assert status["paid"]["ok"] == 3 and status["paid"]["resting_s"] == 0
+
+
+async def test_router_prefers_free_and_never_rests_last():
+    hits: list[str] = []
+
+    def free(request):
+        hits.append("free")
+        return _ok(request)
+
+    def broken(request):
+        hits.append("paid")
+        return httpx.Response(500, json={"error": "boom"})
+
+    router = LLMRouter([_route("groq", free), _route("paid", broken)])
+    reply = await router.chat("Разбери резюме", "x", max_tokens=10)
+    assert reply.provider == "groq" and hits == ["free"]
+
+    only_paid = LLMRouter([_route("paid", broken)])
+    for _ in range(2):  # последний не откладывается — каждый раз пробуем снова
+        with pytest.raises(LLMError):
+            await only_paid.chat("Разбери резюме", "x", max_tokens=10)
+    assert hits.count("paid") == 2 and only_paid.routes[0].resting_until == 0
+
+
+def test_cooldown_for():
+    assert cooldown_for(LLMError("HTTP 429: slow down", status=429)) == 60
+    assert cooldown_for(LLMError("HTTP 429", status=429, retry_after=120)) == 120
+    assert cooldown_for(LLMError("HTTP 429: daily quota", status=429)) == 30 * 60
+    assert cooldown_for(LLMError("HTTP 403: region", status=403)) == 60 * 60
+    assert cooldown_for(LLMError("network: ReadTimeout")) == 60
+
+
+def test_free_providers_from_env():
+    base = {"TELEGRAM_BOT_TOKEN": "t"}
+    s = Settings.from_env(
+        {**base, "AI_GROQ_KEY": "g", "AI_GEMINI_KEY": "x", "AI_GEMINI_MODEL": "gemini-x"}
+    )
+    assert [(p.name, p.model) for p in s.ai.free] == [
+        ("groq", "llama-3.3-70b-versatile"),
+        ("gemini", "gemini-x"),
+    ]
+    assert s.ai.enabled and not s.ai.paid_enabled
+    s = Settings.from_env(
+        {**base, "AI_GROQ_KEY": "g", "AI_GEMINI_KEY": "x", "AI_FREE_ORDER": "gemini, groq"}
+    )
+    assert [p.name for p in s.ai.free] == ["gemini", "groq"]
+    assert Settings.from_env({**base, "AI_GROQ_KEY": "g", "AI_FREE_ORDER": "off"}).ai.free == ()
+    with pytest.raises(ConfigError):
+        Settings.from_env({**base, "AI_FREE_ORDER": "groq,chatgpt"})
+
+
+def test_chain_order():
+    ai = AISettings(
+        base_url="https://p/v1",
+        api_key="k",
+        model="m",
+        fallback_model="f",
+        free=(AIProvider("groq", "https://g/v1", "gk", "gm"),),
+    )
+    chain = build_llm_chain(ai)
+    assert [(r.name, r.model) for r in chain.routes] == [
+        ("groq", "gm"),
+        ("paid", "m"),
+        ("paid-fallback", "f"),
+    ]
+    assert chain.routes[1].client is chain.routes[2].client
