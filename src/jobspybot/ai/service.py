@@ -26,7 +26,7 @@ from html import escape
 from typing import Any
 
 from jobspybot import feedback
-from jobspybot.ai.client import LLMClient, LLMError, parse_json
+from jobspybot.ai.client import LLMError, LLMRouter, parse_json
 from jobspybot.ai.compress import compress_description
 from jobspybot.config import AISettings
 from jobspybot.db import Application, Database, Resume, User, utcnow
@@ -229,7 +229,7 @@ Describe = Callable[[Vacancy], Awaitable[str]]
 
 
 class AIService:
-    def __init__(self, db: Database, llm: LLMClient, settings: AISettings) -> None:
+    def __init__(self, db: Database, llm: LLMRouter, settings: AISettings) -> None:
         self.db = db
         self.llm = llm
         self.settings = settings
@@ -277,7 +277,7 @@ class AIService:
             )
 
     def _provider_failed(self, exc: LLMError) -> None:
-        """Подряд несколько ошибок или кончились деньги — сообщить админу."""
+        """Не ответил ни один провайдер цепочки — после нескольких раз сообщить админу."""
         self._failures += 1
         text = str(exc)
         no_money = any(
@@ -285,7 +285,7 @@ class AIService:
         )
         if self.on_alert and (no_money or self._failures >= 3):
             reason = "закончился баланс или квота" if no_money else "несколько ошибок подряд"
-            self.on_alert("ai", f"🤖 ИИ-провайдер недоступен ({reason}):\n{text[:300]}")
+            self.on_alert("ai", f"🤖 Не отвечает ни один ИИ-провайдер ({reason}):\n{text[:300]}")
 
     async def _ask(
         self, user: User, system: str, prompt: str, *, what: str = "запрос", **kw: Any
@@ -297,16 +297,13 @@ class AIService:
             if str(exc).startswith(("no JSON", "bad JSON", "JSON is not")):
                 raise
             self._provider_failed(exc)
-            fallback = self.settings.fallback_model
-            if not fallback or fallback == self.llm.model:
-                raise
-            log.warning("model %s failed (%s), trying %s", self.llm.model, exc, fallback)
-            reply = await self.llm.chat(system, prompt, model=fallback, **kw)
+            raise
         self._failures = 0
         self.db.add_tokens(user.id, reply.tokens)
         log.info(
-            "ИИ %s для %s: %d токенов за %.1f с, у него за сегодня %s из %s",
+            "ИИ %s (%s) для %s: %d токенов за %.1f с, у него за сегодня %s из %s",
             what,
+            reply.provider,
             user.id,
             reply.tokens,
             time.monotonic() - started,
